@@ -23,6 +23,8 @@ local NPC_CONFIG = {
 	MaxChainLength = 8, -- Maximum number of waypoints in a chain
 	MaxWaypointDistance = 30, -- Maximum distance between connected waypoints
 	ChainConnectionDistance = 25, -- Distance to consider waypoints as "connected"
+	-- Job Integration
+	EnableJobs = true, -- Set to false to disable job system
 	-- Debug settings
 	DebugPrints = true, -- Set to false to disable print statements
 	PreventTeleporting = true -- Prevent NPCs from teleporting when hurt
@@ -40,7 +42,7 @@ function NPC.new(character, config)
 	self.RootPart = character:FindFirstChild("HumanoidRootPart")
 
 	if not self.Humanoid or not self.RootPart then
-		if config.DebugPrints then
+		if config and config.DebugPrints then
 			warn("Failed to find Humanoid or HumanoidRootPart in " .. character.Name)
 		end
 		return nil
@@ -49,25 +51,24 @@ function NPC.new(character, config)
 	self.Config = config or NPC_CONFIG
 
 	-- State management
-	self.State = "Wandering" -- "Wandering", "Fleeing", "Returning"
+	self.State = "Wandering" -- "Wandering", "Fleeing", "Returning", "Working"
 	self.OriginalPosition = self.RootPart.Position
-	self.OriginalCFrame = self.RootPart.CFrame -- Store original CFrame to prevent teleporting
+	self.OriginalCFrame = self.RootPart.CFrame
 	self.CurrentPath = nil
 	self.LastPathUpdate = 0
 	self.FleeStartTime = 0
 	self.ThreatPlayer = nil
 
 	-- Chain pathfinding system
-	self.CurrentChain = {} -- Current sequence of waypoints to follow
-	self.CurrentChainIndex = 1 -- Index in the current chain
-	self.WaypointChains = {} -- All possible chains of waypoints
+	self.CurrentChain = {}
+	self.CurrentChainIndex = 1
+	self.WaypointChains = {}
 	
-	-- Store the chain and index before fleeing so we can return to it
 	self.PreFleeChain = nil
 	self.PreFleeChainIndex = 1
 
 	-- Player memory system
-	self.RememberedThreats = {} -- {playerName = {lastSeen = tick(), dangerLevel = number}}
+	self.RememberedThreats = {}
 
 	-- Pathfinding setup
 	self.PathfindingAgent = {
@@ -77,11 +78,15 @@ function NPC.new(character, config)
 		WaypointSpacing = 4
 	}
 
-	-- Setup waypoints from NPCPoints folder
+	-- Setup components
 	self:SetupWaypoints()
-
-	-- Setup injury detection
 	self:SetupInjuryDetection()
+	
+	-- Initialize job system if enabled
+	self.JobSystem = nil
+	if self.Config.EnableJobs then
+		self:InitializeJobSystem()
+	end
 
 	-- Start the main loop
 	self:StartMainLoop()
@@ -89,8 +94,28 @@ function NPC.new(character, config)
 	return self
 end
 
+function NPC:InitializeJobSystem()
+	-- Wait for job system to be available
+	spawn(function()
+		local attempts = 0
+		while not _G.JobSystem and attempts < 50 do
+			wait(0.1)
+			attempts = attempts + 1
+		end
+		
+		if _G.JobSystem then
+			self.JobSystem = _G.JobSystem.new(self)
+			if self.Config.DebugPrints then
+				print(self.Character.Name .. " job system initialized")
+			end
+		elseif self.Config.DebugPrints then
+			warn(self.Character.Name .. " could not initialize job system - JobSystem not found")
+		end
+	end)
+end
+
+-- [All the existing functions remain the same - SetupWaypoints, GenerateWaypointChains, etc.]
 function NPC:SetupWaypoints()
-	-- Find NPCPoints folder
 	local npcPointsFolder = workspace:FindFirstChild(self.Config.NPCPointsFolderName)
 
 	if not npcPointsFolder then
@@ -101,7 +126,6 @@ function NPC:SetupWaypoints()
 		return
 	end
 
-	-- Get all parts from NPCPoints folder
 	self.WaypointParts = {}
 	for _, child in pairs(npcPointsFolder:GetChildren()) do
 		if child:IsA("BasePart") then
@@ -121,18 +145,13 @@ function NPC:SetupWaypoints()
 		print(self.Character.Name .. " found " .. #self.WaypointParts .. " waypoints in " .. self.Config.NPCPointsFolderName)
 	end
 
-	-- Generate waypoint chains instead of random waypoints
 	self:GenerateWaypointChains()
-
-	-- Choose initial chain
 	self:ChooseNewChain()
 end
 
 function NPC:GenerateWaypointChains()
-	-- Create chains of connected waypoints
 	self.WaypointChains = {}
 
-	-- For each waypoint, try to create chains starting from it
 	for _, startPoint in ipairs(self.WaypointParts) do
 		local chains = self:FindChainsFromPoint(startPoint)
 		for _, chain in ipairs(chains) do
@@ -149,18 +168,14 @@ function NPC:FindChainsFromPoint(startPoint)
 	local chains = {}
 	local visited = {}
 
-	-- Find all possible chains starting from this point
 	local function buildChain(currentPoint, currentChain, depth)
-		-- Prevent infinite recursion
 		if depth > self.Config.MaxChainLength then
 			return
 		end
 
-		-- Add current point to chain
 		table.insert(currentChain, currentPoint)
 		visited[currentPoint] = true
 
-		-- If we have a decent chain length, save it
 		if #currentChain >= self.Config.MinChainLength then
 			local chainCopy = {}
 			for i, point in ipairs(currentChain) do
@@ -169,10 +184,8 @@ function NPC:FindChainsFromPoint(startPoint)
 			table.insert(chains, chainCopy)
 		end
 
-		-- Find connected waypoints
 		local connectedPoints = self:FindConnectedWaypoints(currentPoint, visited)
 
-		-- Continue building chains with connected points
 		for _, nextPoint in ipairs(connectedPoints) do
 			buildChain(nextPoint, {unpack(currentChain)}, depth + 1)
 		end
@@ -197,7 +210,6 @@ function NPC:FindConnectedWaypoints(fromPoint, excludeVisited)
 		end
 	end
 
-	-- Sort by distance (closest first)
 	table.sort(connected, function(a, b)
 		local distA = (fromPoint.Position - a.Position).Magnitude
 		local distB = (fromPoint.Position - b.Position).Magnitude
@@ -216,7 +228,6 @@ function NPC:ChooseNewChain()
 		return
 	end
 
-	-- Choose a random chain
 	local randomChainIndex = math.random(1, #self.WaypointChains)
 	self.CurrentChain = self.WaypointChains[randomChainIndex]
 	self.CurrentChainIndex = 1
@@ -246,7 +257,6 @@ function NPC:AdvanceInChain()
 
 	self.CurrentChainIndex = self.CurrentChainIndex + 1
 
-	-- If we've reached the end of the chain, choose a new one
 	if self.CurrentChainIndex > #self.CurrentChain then
 		if self.Config.DebugPrints then
 			print(self.Character.Name .. " completed chain, choosing new one")
@@ -263,7 +273,6 @@ function NPC:AdvanceInChain()
 end
 
 function NPC:CreateFallbackWaypoints()
-	-- Create waypoints around the NPC's spawn position
 	local center = self.OriginalPosition
 	self.FallbackWaypoints = {
 		center + Vector3.new(20, 0, 0),
@@ -276,45 +285,38 @@ function NPC:CreateFallbackWaypoints()
 		center + Vector3.new(15, 0, -15)
 	}
 
-	-- Create a simple chain from fallback waypoints
 	self.CurrentChain = {}
 	for i, pos in ipairs(self.FallbackWaypoints) do
-		-- Create fake parts for consistency
 		local fakePart = {Position = pos, Name = "Fallback" .. i}
 		table.insert(self.CurrentChain, fakePart)
 	end
 	self.CurrentChainIndex = 1
 end
 
+-- [Include all other existing functions like SetupInjuryDetection, OnInjured, etc. - they remain unchanged]
 function NPC:SetupInjuryDetection()
-	-- Detect when NPC takes damage
 	self.Humanoid.HealthChanged:Connect(function(health)
 		if health < self.Humanoid.MaxHealth then
 			self:OnInjured()
 		end
 	end)
 
-	-- Also detect when hit by tools/weapons
 	self.Character.ChildAdded:Connect(function(child)
 		if child:IsA("Tool") then
 			self:OnInjured()
 		end
 	end)
 
-	-- Prevent teleporting when hurt
 	if self.Config.PreventTeleporting then
 		self.Humanoid.PlatformStand = false
 
-		-- Monitor for unwanted position changes
 		spawn(function()
 			while self.Character and self.Character.Parent do
 				local currentPos = self.RootPart.Position
-				local expectedMaxDistance = 50 -- Maximum reasonable distance the NPC should move in one frame
+				local expectedMaxDistance = 50
 
 				if (currentPos - self.OriginalPosition).Magnitude > expectedMaxDistance * 3 then
-					-- If NPC has moved too far from original position unexpectedly, check if it's falling
 					if self.RootPart.Velocity.Y < -50 then
-						-- NPC is falling too fast, likely teleported upward, restore position
 						self.RootPart.CFrame = CFrame.new(self.OriginalPosition + Vector3.new(0, 5, 0))
 						self.RootPart.Velocity = Vector3.new(0, 0, 0)
 
@@ -333,14 +335,16 @@ end
 function NPC:OnInjured()
 	if self.State == "Fleeing" then return end
 
-	-- Store current path state before fleeing so we can return to it
+	-- Stop any job if working
+	if self.State == "Working" and self.JobSystem then
+		self.JobSystem:EndJob()
+	end
+
 	self.PreFleeChain = self.CurrentChain
 	self.PreFleeChainIndex = self.CurrentChainIndex
 
-	-- Find the closest player as the threat
 	local closestPlayer = self:FindClosestPlayer()
 	if closestPlayer then
-		-- Remember this player as a threat
 		self:RememberThreat(closestPlayer)
 
 		self.ThreatPlayer = closestPlayer
@@ -354,6 +358,7 @@ function NPC:OnInjured()
 	end
 end
 
+-- [Continue with remaining existing functions...]
 function NPC:FindClosestPlayer()
 	local closestPlayer = nil
 	local closestDistance = math.huge
@@ -380,7 +385,6 @@ function NPC:RememberThreat(player)
 			player = player
 		}
 	else
-		-- Increase danger level for repeat offenders
 		self.RememberedThreats[playerName].dangerLevel = self.RememberedThreats[playerName].dangerLevel + 1
 		self.RememberedThreats[playerName].lastSeen = tick()
 		self.RememberedThreats[playerName].player = player
@@ -435,7 +439,6 @@ function NPC:GetAvoidanceAdjustedDestination(originalDestination)
 	local avoidanceVector = Vector3.new(0, 0, 0)
 	local myPos = self.RootPart.Position
 
-	-- Calculate avoidance vector based on all nearby threats
 	for _, threat in ipairs(threats) do
 		local threatPos = threat.position
 		local directionAway = (myPos - threatPos).Unit
@@ -445,10 +448,8 @@ function NPC:GetAvoidanceAdjustedDestination(originalDestination)
 		avoidanceVector = avoidanceVector + (directionAway * influence * 20)
 	end
 
-	-- Apply avoidance to destination
 	local adjustedDestination = originalDestination + avoidanceVector
 
-	-- Make sure the adjusted destination is still reasonable (not too far off course)
 	local maxDeviation = 30
 	local deviation = (adjustedDestination - originalDestination).Magnitude
 	if deviation > maxDeviation then
@@ -468,7 +469,6 @@ function NPC:GetFleeDestination()
 	local myPos = self.RootPart.Position
 	local fleeDirection = (myPos - threatPos).Unit
 
-	-- Flee further away from players with higher danger levels
 	local dangerMultiplier = 1
 	if self.RememberedThreats[self.ThreatPlayer.Name] then
 		dangerMultiplier = self.RememberedThreats[self.ThreatPlayer.Name].dangerLevel
@@ -500,9 +500,8 @@ function NPC:FollowPath(path)
 	local waypoints = path:GetWaypoints()
 	if #waypoints < 2 then return end
 
-	self.Humanoid:MoveTo(waypoints[2].Position) -- Skip first waypoint (current position)
+	self.Humanoid:MoveTo(waypoints[2].Position)
 
-	-- Handle waypoint reached
 	local connection
 	connection = self.Humanoid.MoveToFinished:Connect(function(reached)
 		if reached and #waypoints > 2 then
@@ -511,12 +510,10 @@ function NPC:FollowPath(path)
 				self.Humanoid:MoveTo(waypoints[2].Position)
 			else
 				connection:Disconnect()
-				-- Check if we've reached our target waypoint in the chain
 				self:CheckWaypointReached()
 			end
 		else
 			connection:Disconnect()
-			-- Check if we've reached our target waypoint in the chain
 			self:CheckWaypointReached()
 		end
 	end)
@@ -527,13 +524,11 @@ function NPC:CheckWaypointReached()
 	local distanceToTarget = (self.RootPart.Position - currentTarget).Magnitude
 
 	if distanceToTarget <= self.Config.WaypointTolerance then
-		-- We've reached the current waypoint in the chain, advance to next
 		self:AdvanceInChain()
 	end
 end
 
 function NPC:GetNextWaypoint()
-	-- Get the current waypoint from the chain
 	return self:GetCurrentWaypointInChain()
 end
 
@@ -557,32 +552,36 @@ function NPC:FindClosestWaypointInChain(chain)
 	return closestIndex
 end
 
+-- MODIFIED: UpdateWandering now includes job system integration
 function NPC:UpdateWandering()
-	-- Clean up old threat memories
 	self:ForgetOldThreats()
 
-	local currentTime = tick()
-	if currentTime - self.LastPathUpdate > self.Config.PathUpdateInterval then
-		local destination = self:GetNextWaypoint()
+	-- Update job system if available
+	if self.JobSystem then
+		self.JobSystem:Update()
+	end
 
-		-- Adjust destination to avoid remembered threats
-		destination = self:GetAvoidanceAdjustedDestination(destination)
+	-- Only do normal wandering movement if not working
+	if self.State == "Wandering" then
+		local currentTime = tick()
+		if currentTime - self.LastPathUpdate > self.Config.PathUpdateInterval then
+			local destination = self:GetNextWaypoint()
+			destination = self:GetAvoidanceAdjustedDestination(destination)
 
-		local path = self:CreatePath(destination)
-		if path then
-			self:FollowPath(path)
-		else
-			-- Fallback: direct movement
-			self.Humanoid:MoveTo(destination)
+			local path = self:CreatePath(destination)
+			if path then
+				self:FollowPath(path)
+			else
+				self.Humanoid:MoveTo(destination)
+			end
+			self.LastPathUpdate = currentTime
 		end
-		self.LastPathUpdate = currentTime
 	end
 end
 
 function NPC:UpdateFleeing()
 	local currentTime = tick()
 
-	-- Check if we should stop fleeing
 	if self.ThreatPlayer and self.ThreatPlayer.Character and self.ThreatPlayer.Character:FindFirstChild("HumanoidRootPart") then
 		local distance = (self.ThreatPlayer.Character.HumanoidRootPart.Position - self.RootPart.Position).Magnitude
 		if distance > self.Config.FleeDistance * 1.5 or currentTime - self.FleeStartTime > 10 then
@@ -596,8 +595,7 @@ function NPC:UpdateFleeing()
 		return
 	end
 
-	-- Continue fleeing
-	if currentTime - self.LastPathUpdate > 1 then -- Update flee path more frequently
+	if currentTime - self.LastPathUpdate > 1 then
 		local fleeDestination = self:GetFleeDestination()
 		local path = self:CreatePath(fleeDestination)
 		if path then
@@ -610,10 +608,8 @@ function NPC:UpdateFleeing()
 end
 
 function NPC:UpdateReturning()
-	-- Get the return destination (closest waypoint in the pre-flee chain)
 	local returnDestination
 	if self.PreFleeChain and #self.PreFleeChain > 0 then
-		-- Find the closest waypoint in the saved chain to return to
 		local closestIndex = self:FindClosestWaypointInChain(self.PreFleeChain)
 		returnDestination = self.PreFleeChain[closestIndex].Position
 		
@@ -621,17 +617,14 @@ function NPC:UpdateReturning()
 			print(self.Character.Name .. " returning to waypoint " .. closestIndex .. " in saved chain")
 		end
 	else
-		-- Fallback to original position if no chain was saved
 		returnDestination = self.OriginalPosition
 	end
 
 	local distanceToReturn = (self.RootPart.Position - returnDestination).Magnitude
 
 	if distanceToReturn < self.Config.WaypointTolerance then
-		-- Arrived back at the waypoint chain, resume wandering from where we left off
 		wait(self.Config.ReturnDelay)
 		
-		-- Restore the pre-flee chain and continue from the closest waypoint
 		if self.PreFleeChain and #self.PreFleeChain > 0 then
 			self.CurrentChain = self.PreFleeChain
 			self.CurrentChainIndex = self:FindClosestWaypointInChain(self.PreFleeChain)
@@ -645,9 +638,8 @@ function NPC:UpdateReturning()
 		self.ThreatPlayer = nil
 		self.PreFleeChain = nil
 		self.PreFleeChainIndex = 1
-		self.Humanoid.Health = self.Humanoid.MaxHealth -- Heal the NPC
+		self.Humanoid.Health = self.Humanoid.MaxHealth
 	else
-		-- Path back to the return destination
 		local currentTime = tick()
 		if currentTime - self.LastPathUpdate > self.Config.PathUpdateInterval then
 			local path = self:CreatePath(returnDestination)
@@ -661,6 +653,7 @@ function NPC:UpdateReturning()
 	end
 end
 
+-- MODIFIED: Main loop now handles "Working" state
 function NPC:StartMainLoop()
 	spawn(function()
 		while self.Character and self.Character.Parent and self.Humanoid and self.RootPart do
@@ -670,22 +663,24 @@ function NPC:StartMainLoop()
 				self:UpdateFleeing()
 			elseif self.State == "Returning" then
 				self:UpdateReturning()
+			elseif self.State == "Working" then
+				-- Job system handles working state, but we still need to update job system
+				if self.JobSystem then
+					self.JobSystem:Update()
+				end
+				-- Don't do movement while working - job system controls this
 			end
 
-			wait(0.1) -- Update frequency
+			wait(0.1)
 		end
 	end)
 end
 
 -- Initialize the NPC
 local function InitializeNPC()
-	-- Wait a moment for the character to fully load
 	wait(1)
 
-	-- Find the character this script belongs to
 	local character = nil
-
-	-- Check if script is inside a model (the NPC)
 	local parent = script.Parent
 	while parent do
 		if parent:IsA("Model") and parent:FindFirstChild("Humanoid") and parent:FindFirstChild("HumanoidRootPart") then
@@ -695,8 +690,6 @@ local function InitializeNPC()
 		parent = parent.Parent
 	end
 
-	-- If we couldn't find the character from the script's parent hierarchy,
-	-- try to find it in workspace
 	if not character then
 		if NPC_CONFIG.DebugPrints then
 			warn("Could not find NPC character from script location. Make sure this script is inside an NPC model.")
@@ -704,12 +697,14 @@ local function InitializeNPC()
 		return
 	end
 
-	-- Create the NPC behavior
 	local npc = NPC.new(character, NPC_CONFIG)
 	if npc then
 		if NPC_CONFIG.DebugPrints then
 			print("Successfully initialized NPC behavior for " .. character.Name)
 		end
+		
+		-- Store reference globally for job system integration
+		_G["NPC_" .. character.Name] = npc
 	else
 		if NPC_CONFIG.DebugPrints then
 			warn("Failed to initialize NPC behavior for " .. character.Name)
@@ -717,5 +712,4 @@ local function InitializeNPC()
 	end
 end
 
--- Start the NPC initialization
 spawn(InitializeNPC)
