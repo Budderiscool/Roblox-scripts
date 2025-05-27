@@ -1,5 +1,5 @@
 -- Individual NPC Walking Script for Roblox
--- Place this script inside an NPC model as a Server Script
+-- Place this script inside an NPC model (in ServerScriptService or as a Server Script in the model)
 -- Make sure you have a folder called "NPCPoints" in workspace with parts as waypoints
 
 local RunService = game:GetService("RunService")
@@ -24,15 +24,6 @@ local NPC_CONFIG = {
     NPCPointsFolderName = "NPCPoints", -- Name of folder containing waypoint parts
     RandomWaypoints = true -- If true, chooses random waypoints; if false, follows in order
 }
-
--- Get the NPC character (the model this script is inside)
-local character = script.Parent
-local humanoid = character:WaitForChild("Humanoid", 10)
-local rootPart = character:WaitForChild("HumanoidRootPart", 10)
-
-if not humanoid or not rootPart then
-    error("This script must be placed inside an NPC model with Humanoid and HumanoidRootPart!")
-end
 
 -- NPC Class
 local NPC = {}
@@ -132,13 +123,12 @@ function NPC:CreateFallbackWaypoints()
         center + Vector3.new(15, 0, -15)
     }
     self.CurrentWaypointIndex = 1
-    print(self.Character.Name .. " using fallback waypoints around spawn position")
 end
 
 function NPC:SetupInjuryDetection()
     -- Detect when NPC takes damage
     self.Humanoid.HealthChanged:Connect(function(health)
-        if health < self.Humanoid.MaxHealth and health > 0 then
+        if health < self.Humanoid.MaxHealth then
             self:OnInjured()
         end
     end)
@@ -236,6 +226,7 @@ function NPC:ForgetOldThreats()
     local currentTime = tick()
     for playerName, threatData in pairs(self.RememberedThreats) do
         if currentTime - threatData.lastSeen > self.Config.MemoryDuration then
+            print(self.Character.Name .. " has forgotten about " .. playerName)
             self.RememberedThreats[playerName] = nil
         end
     end
@@ -324,6 +315,7 @@ function NPC:CreatePath(destination)
     if success and path.Status == Enum.PathStatus.Success then
         return path
     else
+        warn("Path creation failed for " .. self.Character.Name .. ": " .. tostring(errorMessage))
         return nil
     end
 end
@@ -475,17 +467,38 @@ function NPC:StartMainLoop()
 end
 
 -- Initialize the NPC
-print("Initializing NPC behavior for " .. character.Name)
-
--- Set initial properties
-humanoid.WalkSpeed = NPC_CONFIG.WalkSpeed
-humanoid.MaxHealth = 100
-humanoid.Health = 100
-
--- Create the NPC behavior
-local npc = NPC.new(character, NPC_CONFIG)
-if npc then
-    print("Successfully initialized NPC behavior for " .. character.Name)
-else
-    warn("Failed to initialize NPC behavior for " .. character.Name)
+local function InitializeNPC()
+    -- Wait a moment for the character to fully load
+    wait(1)
+    
+    -- Find the character this script belongs to
+    local character = nil
+    
+    -- Check if script is inside a model (the NPC)
+    local parent = script.Parent
+    while parent do
+        if parent:IsA("Model") and parent:FindFirstChild("Humanoid") and parent:FindFirstChild("HumanoidRootPart") then
+            character = parent
+            break
+        end
+        parent = parent.Parent
+    end
+    
+    -- If we couldn't find the character from the script's parent hierarchy,
+    -- try to find it in workspace
+    if not character then
+        warn("Could not find NPC character from script location. Make sure this script is inside an NPC model.")
+        return
+    end
+    
+    -- Create the NPC behavior
+    local npc = NPC.new(character, NPC_CONFIG)
+    if npc then
+        print("Successfully initialized NPC behavior for " .. character.Name)
+    else
+        warn("Failed to initialize NPC behavior for " .. character.Name)
+    end
 end
+
+-- Start the NPC initialization
+spawn(InitializeNPC)
