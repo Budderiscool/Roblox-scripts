@@ -1,5 +1,6 @@
 -- Realistic Walking NPC Script for Roblox
 -- Place this script in ServerScriptService
+-- Make sure you have a model called "NPCDummy" in workspace
 
 local RunService = game:GetService("RunService")
 local PathfindingService = game:GetService("PathfindingService")
@@ -19,6 +20,8 @@ local NPC_CONFIG = {
     -- New spawn configuration
     NumberOfNPCs = 5, -- How many NPCs to spawn
     SpawnOnWaypoints = true, -- Spawn NPCs at waypoint locations
+    DummyName = "NPCDummy", -- Name of the dummy to duplicate
+    NPCFolderName = "WalkingNPCs", -- Name of folder to store NPCs
     -- Player memory and avoidance
     MemoryDuration = 300, -- How long NPCs remember players (seconds)
     AvoidanceDistance = 25, -- Distance to maintain from remembered threats
@@ -33,8 +36,14 @@ function NPC.new(character, config)
     local self = setmetatable({}, NPC)
     
     self.Character = character
-    self.Humanoid = character:WaitForChild("Humanoid")
-    self.RootPart = character:WaitForChild("HumanoidRootPart")
+    self.Humanoid = character:WaitForChild("Humanoid", 5)
+    self.RootPart = character:WaitForChild("HumanoidRootPart", 5)
+    
+    if not self.Humanoid or not self.RootPart then
+        warn("Failed to find Humanoid or HumanoidRootPart in " .. character.Name)
+        return nil
+    end
+    
     self.Config = config or NPC_CONFIG
     
     -- State management
@@ -176,12 +185,13 @@ function NPC:CreateFleeEffect()
     effect.Anchored = true
     effect.Parent = workspace
     
-    local weld = Instance.new("WeldConstraint")
-    weld.Part0 = effect
-    weld.Part1 = self.Character:FindFirstChild("Head")
-    if weld.Part1 then
+    local head = self.Character:FindFirstChild("Head")
+    if head then
+        local weld = Instance.new("WeldConstraint")
+        weld.Part0 = effect
+        weld.Part1 = head
         weld.Parent = effect
-        effect.CFrame = self.Character.Head.CFrame + Vector3.new(0, 2, 0)
+        effect.CFrame = head.CFrame + Vector3.new(0, 2, 0)
     end
     
     Debris:AddItem(effect, 3)
@@ -441,6 +451,19 @@ end
 -- NPC Management
 local SpawnedNPCs = {}
 local NPCCounter = 1
+local NPCFolder = nil
+
+-- Function to create or get NPC folder
+local function GetOrCreateNPCFolder()
+    local folder = workspace:FindFirstChild(NPC_CONFIG.NPCFolderName)
+    if not folder then
+        folder = Instance.new("Folder")
+        folder.Name = NPC_CONFIG.NPCFolderName
+        folder.Parent = workspace
+        print("Created NPC folder: " .. NPC_CONFIG.NPCFolderName)
+    end
+    return folder
+end
 
 -- Function to get all waypoint positions
 local function GetAllWaypointPositions()
@@ -475,56 +498,81 @@ local function GetAllWaypointPositions()
     return positions
 end
 
--- Function to spawn an NPC
-local function SpawnNPC(position, customConfig)
-    local config = customConfig or NPC_CONFIG
+-- Function to find and duplicate the NPCDummy
+local function FindAndDuplicateNPCDummy()
+    local dummy = workspace:FindFirstChild(NPC_CONFIG.DummyName)
     
-    -- Create NPC character
-    local npcModel = Instance.new("Model")
+    if not dummy then
+        warn("NPCDummy not found in workspace! Make sure you have a model called '" .. NPC_CONFIG.DummyName .. "' in workspace.")
+        return nil
+    end
+    
+    if not dummy:IsA("Model") then
+        warn("NPCDummy must be a Model!")
+        return nil
+    end
+    
+    -- Check if dummy has required parts
+    local humanoid = dummy:FindFirstChild("Humanoid")
+    local rootPart = dummy:FindFirstChild("HumanoidRootPart")
+    
+    if not humanoid then
+        warn("NPCDummy must have a Humanoid!")
+        return nil
+    end
+    
+    if not rootPart then
+        warn("NPCDummy must have a HumanoidRootPart!")
+        return nil
+    end
+    
+    return dummy:Clone()
+end
+
+-- Function to spawn an NPC using the dummy
+local function SpawnNPCFromDummy(position, customConfig)
+    local config = customConfig or NPC_CONFIG
+    local npcModel = FindAndDuplicateNPCDummy()
+    
+    if not npcModel then
+        print("Failed to create NPC - dummy not found or invalid")
+        return nil
+    end
+    
+    -- Set up the NPC
     npcModel.Name = "WalkingNPC_" .. NPCCounter
     NPCCounter = NPCCounter + 1
-    npcModel.Parent = workspace
     
-    -- Create basic NPC parts
-    local humanoid = Instance.new("Humanoid")
-    humanoid.MaxHealth = 100
-    humanoid.Health = 100
-    humanoid.WalkSpeed = config.WalkSpeed
-    humanoid.Parent = npcModel
+    -- Position the NPC
+    if npcModel.PrimaryPart then
+        npcModel:SetPrimaryPartCFrame(CFrame.new(position))
+    else
+        local rootPart = npcModel:FindFirstChild("HumanoidRootPart")
+        if rootPart then
+            rootPart.CFrame = CFrame.new(position)
+        end
+    end
     
-    local rootPart = Instance.new("Part")
-    rootPart.Name = "HumanoidRootPart"
-    rootPart.Size = Vector3.new(2, 2, 1)
-    rootPart.CFrame = CFrame.new(position)
-    rootPart.CanCollide = false
-    rootPart.Parent = npcModel
+    -- Configure the humanoid
+    local humanoid = npcModel:FindFirstChild("Humanoid")
+    if humanoid then
+        humanoid.MaxHealth = 100
+        humanoid.Health = 100
+        humanoid.WalkSpeed = config.WalkSpeed
+    end
     
-    local head = Instance.new("Part")
-    head.Name = "Head"
-    head.Size = Vector3.new(2, 1, 1)
-    head.CFrame = rootPart.CFrame + Vector3.new(0, 1.5, 0)
-    head.Parent = npcModel
-    
-    local torso = Instance.new("Part")
-    torso.Name = "Torso"
-    torso.Size = Vector3.new(2, 2, 1)
-    torso.CFrame = rootPart.CFrame
-    torso.Parent = npcModel
-    
-    -- Weld parts together
-    local headWeld = Instance.new("WeldConstraint")
-    headWeld.Part0 = rootPart
-    headWeld.Part1 = head
-    headWeld.Parent = rootPart
-    
-    local torsoWeld = Instance.new("WeldConstraint")
-    torsoWeld.Part0 = rootPart
-    torsoWeld.Part1 = torso
-    torsoWeld.Parent = rootPart
+    -- Parent to NPC folder
+    npcModel.Parent = NPCFolder
     
     -- Create the NPC behavior
     local npc = NPC.new(npcModel, config)
-    table.insert(SpawnedNPCs, npc)
+    if npc then
+        table.insert(SpawnedNPCs, npc)
+        print("Successfully spawned " .. npcModel.Name .. " at " .. tostring(position))
+    else
+        warn("Failed to create NPC behavior for " .. npcModel.Name)
+        npcModel:Destroy()
+    end
     
     return npc
 end
@@ -532,6 +580,16 @@ end
 -- Function to spawn multiple NPCs
 local function SpawnMultipleNPCs()
     wait(2) -- Wait for game to load
+    
+    -- Create or get NPC folder
+    NPCFolder = GetOrCreateNPCFolder()
+    
+    -- Clear any existing NPCs in the folder
+    for _, child in pairs(NPCFolder:GetChildren()) do
+        if child:IsA("Model") then
+            child:Destroy()
+        end
+    end
     
     local spawnPositions = {}
     
@@ -556,7 +614,7 @@ local function SpawnMultipleNPCs()
     
     -- Spawn NPCs up to the configured amount
     local npcCount = math.min(NPC_CONFIG.NumberOfNPCs, #spawnPositions)
-    print("Spawning " .. npcCount .. " NPCs...")
+    print("Spawning " .. npcCount .. " NPCs using dummy: " .. NPC_CONFIG.DummyName)
     
     for i = 1, npcCount do
         local spawnPos = spawnPositions[i]
@@ -566,11 +624,31 @@ local function SpawnMultipleNPCs()
         end
         
         print("Spawning NPC " .. i .. " at position: " .. tostring(spawnPos))
-        SpawnNPC(spawnPos)
+        SpawnNPCFromDummy(spawnPos)
         wait(0.5) -- Small delay between spawns
     end
     
-    print("Finished spawning " .. npcCount .. " NPCs!")
+    print("Finished spawning " .. #SpawnedNPCs .. " NPCs in folder: " .. NPCFolder.Name)
+end
+
+-- Cleanup function
+local function CleanupNPCs()
+    for _, npc in pairs(SpawnedNPCs) do
+        if npc.Character and npc.Character.Parent then
+            npc.Character:Destroy()
+        end
+    end
+    SpawnedNPCs = {}
+    
+    if NPCFolder then
+        for _, child in pairs(NPCFolder:GetChildren()) do
+            if child:IsA("Model") then
+                child:Destroy()
+            end
+        end
+    end
+    
+    print("Cleaned up all NPCs")
 end
 
 -- Example usage: Spawn NPCs based on configuration
@@ -602,3 +680,7 @@ spawn(function()
         waypoint.Parent = workspace
     end
 end)
+
+-- Commands for testing (you can call these from command bar)
+-- CleanupNPCs() -- Removes all spawned NPCs
+-- SpawnMultipleNPCs() -- Spawns new set of NPCs
