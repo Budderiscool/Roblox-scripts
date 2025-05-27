@@ -1,6 +1,6 @@
--- Realistic Walking NPC Script for Roblox
--- Place this script in ServerScriptService
--- Make sure you have a model called "NPCDummy" in workspace
+-- Individual NPC Walking Script for Roblox
+-- Place this script inside an NPC model as a Server Script
+-- Make sure you have a folder called "NPCPoints" in workspace with parts as waypoints
 
 local RunService = game:GetService("RunService")
 local PathfindingService = game:GetService("PathfindingService")
@@ -14,19 +14,25 @@ local NPC_CONFIG = {
     FleeDistance = 50,
     ReturnDelay = 3,
     PathUpdateInterval = 2,
-    UsePointToPoint = false, -- Set to true for point-to-point, false for part-based pathfinding
     WaypointTolerance = 4,
     MaxPathfindingRetries = 3,
-    -- New spawn configuration
-    NumberOfNPCs = 5, -- How many NPCs to spawn
-    SpawnOnWaypoints = true, -- Spawn NPCs at waypoint locations
-    DummyName = "NPCDummy", -- Name of the dummy to duplicate
-    NPCFolderName = "WalkingNPCs", -- Name of folder to store NPCs
     -- Player memory and avoidance
     MemoryDuration = 300, -- How long NPCs remember players (seconds)
     AvoidanceDistance = 25, -- Distance to maintain from remembered threats
-    AvoidanceStrength = 1.5 -- How much to bend path away from threats
+    AvoidanceStrength = 1.5, -- How much to bend path away from threats
+    -- Waypoint settings
+    NPCPointsFolderName = "NPCPoints", -- Name of folder containing waypoint parts
+    RandomWaypoints = true -- If true, chooses random waypoints; if false, follows in order
 }
+
+-- Get the NPC character (the model this script is inside)
+local character = script.Parent
+local humanoid = character:WaitForChild("Humanoid", 10)
+local rootPart = character:WaitForChild("HumanoidRootPart", 10)
+
+if not humanoid or not rootPart then
+    error("This script must be placed inside an NPC model with Humanoid and HumanoidRootPart!")
+end
 
 -- NPC Class
 local NPC = {}
@@ -36,8 +42,8 @@ function NPC.new(character, config)
     local self = setmetatable({}, NPC)
     
     self.Character = character
-    self.Humanoid = character:WaitForChild("Humanoid", 5)
-    self.RootPart = character:WaitForChild("HumanoidRootPart", 5)
+    self.Humanoid = character:FindFirstChild("Humanoid")
+    self.RootPart = character:FindFirstChild("HumanoidRootPart")
     
     if not self.Humanoid or not self.RootPart then
         warn("Failed to find Humanoid or HumanoidRootPart in " .. character.Name)
@@ -57,7 +63,6 @@ function NPC.new(character, config)
     
     -- Player memory system
     self.RememberedThreats = {} -- {playerName = {lastSeen = tick(), dangerLevel = number}}
-    self.CurrentTarget = nil
     
     -- Pathfinding setup
     self.PathfindingAgent = {
@@ -67,12 +72,8 @@ function NPC.new(character, config)
         WaypointSpacing = 4
     }
     
-    -- Get waypoints based on configuration
-    if self.Config.UsePointToPoint then
-        self:SetupPointToPointWaypoints()
-    else
-        self:SetupPartBasedWaypoints()
-    end
+    -- Setup waypoints from NPCPoints folder
+    self:SetupWaypoints()
     
     -- Setup injury detection
     self:SetupInjuryDetection()
@@ -83,10 +84,44 @@ function NPC.new(character, config)
     return self
 end
 
-function NPC:SetupPointToPointWaypoints()
-    -- Define waypoints around the spawn area
+function NPC:SetupWaypoints()
+    -- Find NPCPoints folder
+    local npcPointsFolder = workspace:FindFirstChild(self.Config.NPCPointsFolderName)
+    
+    if not npcPointsFolder then
+        warn("NPCPoints folder not found in workspace! Creating example waypoints around NPC spawn.")
+        self:CreateFallbackWaypoints()
+        return
+    end
+    
+    -- Get all parts from NPCPoints folder
+    self.WaypointParts = {}
+    for _, child in pairs(npcPointsFolder:GetChildren()) do
+        if child:IsA("BasePart") then
+            table.insert(self.WaypointParts, child)
+        end
+    end
+    
+    if #self.WaypointParts == 0 then
+        warn("No parts found in NPCPoints folder! Creating fallback waypoints.")
+        self:CreateFallbackWaypoints()
+        return
+    end
+    
+    print(self.Character.Name .. " found " .. #self.WaypointParts .. " waypoints in " .. self.Config.NPCPointsFolderName)
+    
+    -- Sort waypoints by name if not using random waypoints
+    if not self.Config.RandomWaypoints then
+        table.sort(self.WaypointParts, function(a, b)
+            return a.Name < b.Name
+        end)
+    end
+end
+
+function NPC:CreateFallbackWaypoints()
+    -- Create waypoints around the NPC's spawn position
     local center = self.OriginalPosition
-    self.Waypoints = {
+    self.FallbackWaypoints = {
         center + Vector3.new(20, 0, 0),
         center + Vector3.new(0, 0, 20),
         center + Vector3.new(-20, 0, 0),
@@ -97,32 +132,13 @@ function NPC:SetupPointToPointWaypoints()
         center + Vector3.new(15, 0, -15)
     }
     self.CurrentWaypointIndex = 1
-end
-
-function NPC:SetupPartBasedWaypoints()
-    -- Find all parts named "NPCWaypoint" in workspace
-    self.WaypointParts = {}
-    local function findWaypoints(parent)
-        for _, child in pairs(parent:GetChildren()) do
-            if child.Name == "NPCWaypoint" and child:IsA("BasePart") then
-                table.insert(self.WaypointParts, child)
-            end
-            findWaypoints(child)
-        end
-    end
-    findWaypoints(workspace)
-    
-    if #self.WaypointParts == 0 then
-        warn("No NPCWaypoint parts found! Creating default waypoints around spawn.")
-        self.Config.UsePointToPoint = true
-        self:SetupPointToPointWaypoints()
-    end
+    print(self.Character.Name .. " using fallback waypoints around spawn position")
 end
 
 function NPC:SetupInjuryDetection()
     -- Detect when NPC takes damage
     self.Humanoid.HealthChanged:Connect(function(health)
-        if health < self.Humanoid.MaxHealth then
+        if health < self.Humanoid.MaxHealth and health > 0 then
             self:OnInjured()
         end
     end)
@@ -220,7 +236,6 @@ function NPC:ForgetOldThreats()
     local currentTime = tick()
     for playerName, threatData in pairs(self.RememberedThreats) do
         if currentTime - threatData.lastSeen > self.Config.MemoryDuration then
-            print(self.Character.Name .. " has forgotten about " .. playerName)
             self.RememberedThreats[playerName] = nil
         end
     end
@@ -309,7 +324,6 @@ function NPC:CreatePath(destination)
     if success and path.Status == Enum.PathStatus.Success then
         return path
     else
-        warn("Path creation failed: " .. tostring(errorMessage))
         return nil
     end
 end
@@ -339,20 +353,32 @@ function NPC:FollowPath(path)
 end
 
 function NPC:GetNextWaypoint()
-    if self.Config.UsePointToPoint then
-        if not self.Waypoints or #self.Waypoints == 0 then return self.OriginalPosition end
-        
-        local waypoint = self.Waypoints[self.CurrentWaypointIndex]
+    -- Check if we have waypoint parts from NPCPoints folder
+    if self.WaypointParts and #self.WaypointParts > 0 then
+        if self.Config.RandomWaypoints then
+            -- Choose a random waypoint
+            local randomPart = self.WaypointParts[math.random(1, #self.WaypointParts)]
+            return randomPart.Position
+        else
+            -- Follow waypoints in order
+            local waypoint = self.WaypointParts[self.CurrentWaypointIndex]
+            self.CurrentWaypointIndex = self.CurrentWaypointIndex + 1
+            if self.CurrentWaypointIndex > #self.WaypointParts then
+                self.CurrentWaypointIndex = 1
+            end
+            return waypoint.Position
+        end
+    elseif self.FallbackWaypoints then
+        -- Use fallback waypoints if NPCPoints folder wasn't found
+        local waypoint = self.FallbackWaypoints[self.CurrentWaypointIndex]
         self.CurrentWaypointIndex = self.CurrentWaypointIndex + 1
-        if self.CurrentWaypointIndex > #self.Waypoints then
+        if self.CurrentWaypointIndex > #self.FallbackWaypoints then
             self.CurrentWaypointIndex = 1
         end
         return waypoint
     else
-        if not self.WaypointParts or #self.WaypointParts == 0 then return self.OriginalPosition end
-        
-        local randomPart = self.WaypointParts[math.random(1, #self.WaypointParts)]
-        return randomPart.Position
+        -- Last resort: return to original position
+        return self.OriginalPosition
     end
 end
 
@@ -382,7 +408,7 @@ function NPC:UpdateFleeing()
     local currentTime = tick()
     
     -- Check if we should stop fleeing
-    if self.ThreatPlayer and self.ThreatPlayer.Character then
+    if self.ThreatPlayer and self.ThreatPlayer.Character and self.ThreatPlayer.Character:FindFirstChild("HumanoidRootPart") then
         local distance = (self.ThreatPlayer.Character.HumanoidRootPart.Position - self.RootPart.Position).Magnitude
         if distance > self.Config.FleeDistance * 1.5 or currentTime - self.FleeStartTime > 10 then
             self.State = "Returning"
@@ -434,7 +460,7 @@ end
 
 function NPC:StartMainLoop()
     spawn(function()
-        while self.Character.Parent do
+        while self.Character and self.Character.Parent and self.Humanoid and self.RootPart do
             if self.State == "Wandering" then
                 self:UpdateWandering()
             elseif self.State == "Fleeing" then
@@ -448,239 +474,18 @@ function NPC:StartMainLoop()
     end)
 end
 
--- NPC Management
-local SpawnedNPCs = {}
-local NPCCounter = 1
-local NPCFolder = nil
+-- Initialize the NPC
+print("Initializing NPC behavior for " .. character.Name)
 
--- Function to create or get NPC folder
-local function GetOrCreateNPCFolder()
-    local folder = workspace:FindFirstChild(NPC_CONFIG.NPCFolderName)
-    if not folder then
-        folder = Instance.new("Folder")
-        folder.Name = NPC_CONFIG.NPCFolderName
-        folder.Parent = workspace
-        print("Created NPC folder: " .. NPC_CONFIG.NPCFolderName)
-    end
-    return folder
+-- Set initial properties
+humanoid.WalkSpeed = NPC_CONFIG.WalkSpeed
+humanoid.MaxHealth = 100
+humanoid.Health = 100
+
+-- Create the NPC behavior
+local npc = NPC.new(character, NPC_CONFIG)
+if npc then
+    print("Successfully initialized NPC behavior for " .. character.Name)
+else
+    warn("Failed to initialize NPC behavior for " .. character.Name)
 end
-
--- Function to get all waypoint positions
-local function GetAllWaypointPositions()
-    local positions = {}
-    
-    if NPC_CONFIG.UsePointToPoint then
-        -- Use predefined positions around origin
-        local center = Vector3.new(0, 10, 0)
-        positions = {
-            center + Vector3.new(20, 0, 0),
-            center + Vector3.new(0, 0, 20),
-            center + Vector3.new(-20, 0, 0),
-            center + Vector3.new(0, 0, -20),
-            center + Vector3.new(15, 0, 15),
-            center + Vector3.new(-15, 0, 15),
-            center + Vector3.new(-15, 0, -15),
-            center + Vector3.new(15, 0, -15)
-        }
-    else
-        -- Find all NPCWaypoint parts
-        local function findWaypoints(parent)
-            for _, child in pairs(parent:GetChildren()) do
-                if child.Name == "NPCWaypoint" and child:IsA("BasePart") then
-                    table.insert(positions, child.Position + Vector3.new(0, 5, 0)) -- Spawn slightly above waypoint
-                end
-                findWaypoints(child)
-            end
-        end
-        findWaypoints(workspace)
-    end
-    
-    return positions
-end
-
--- Function to find and duplicate the NPCDummy
-local function FindAndDuplicateNPCDummy()
-    local dummy = workspace:FindFirstChild(NPC_CONFIG.DummyName)
-    
-    if not dummy then
-        warn("NPCDummy not found in workspace! Make sure you have a model called '" .. NPC_CONFIG.DummyName .. "' in workspace.")
-        return nil
-    end
-    
-    if not dummy:IsA("Model") then
-        warn("NPCDummy must be a Model!")
-        return nil
-    end
-    
-    -- Check if dummy has required parts
-    local humanoid = dummy:FindFirstChild("Humanoid")
-    local rootPart = dummy:FindFirstChild("HumanoidRootPart")
-    
-    if not humanoid then
-        warn("NPCDummy must have a Humanoid!")
-        return nil
-    end
-    
-    if not rootPart then
-        warn("NPCDummy must have a HumanoidRootPart!")
-        return nil
-    end
-    
-    return dummy:Clone()
-end
-
--- Function to spawn an NPC using the dummy
-local function SpawnNPCFromDummy(position, customConfig)
-    local config = customConfig or NPC_CONFIG
-    local npcModel = FindAndDuplicateNPCDummy()
-    
-    if not npcModel then
-        print("Failed to create NPC - dummy not found or invalid")
-        return nil
-    end
-    
-    -- Set up the NPC
-    npcModel.Name = "WalkingNPC_" .. NPCCounter
-    NPCCounter = NPCCounter + 1
-    
-    -- Position the NPC
-    if npcModel.PrimaryPart then
-        npcModel:SetPrimaryPartCFrame(CFrame.new(position))
-    else
-        local rootPart = npcModel:FindFirstChild("HumanoidRootPart")
-        if rootPart then
-            rootPart.CFrame = CFrame.new(position)
-        end
-    end
-    
-    -- Configure the humanoid
-    local humanoid = npcModel:FindFirstChild("Humanoid")
-    if humanoid then
-        humanoid.MaxHealth = 100
-        humanoid.Health = 100
-        humanoid.WalkSpeed = config.WalkSpeed
-    end
-    
-    -- Parent to NPC folder
-    npcModel.Parent = NPCFolder
-    
-    -- Create the NPC behavior
-    local npc = NPC.new(npcModel, config)
-    if npc then
-        table.insert(SpawnedNPCs, npc)
-        print("Successfully spawned " .. npcModel.Name .. " at " .. tostring(position))
-    else
-        warn("Failed to create NPC behavior for " .. npcModel.Name)
-        npcModel:Destroy()
-    end
-    
-    return npc
-end
-
--- Function to spawn multiple NPCs
-local function SpawnMultipleNPCs()
-    wait(2) -- Wait for game to load
-    
-    -- Create or get NPC folder
-    NPCFolder = GetOrCreateNPCFolder()
-    
-    -- Clear any existing NPCs in the folder
-    for _, child in pairs(NPCFolder:GetChildren()) do
-        if child:IsA("Model") then
-            child:Destroy()
-        end
-    end
-    
-    local spawnPositions = {}
-    
-    if NPC_CONFIG.SpawnOnWaypoints then
-        spawnPositions = GetAllWaypointPositions()
-        if #spawnPositions == 0 then
-            warn("No waypoint positions found! Creating default spawn positions.")
-            spawnPositions = {
-                Vector3.new(0, 10, 0),
-                Vector3.new(20, 10, 0),
-                Vector3.new(-20, 10, 0),
-                Vector3.new(0, 10, 20),
-                Vector3.new(0, 10, -20)
-            }
-        end
-    else
-        -- Generate random positions
-        for i = 1, NPC_CONFIG.NumberOfNPCs do
-            table.insert(spawnPositions, Vector3.new(math.random(-50, 50), 10, math.random(-50, 50)))
-        end
-    end
-    
-    -- Spawn NPCs up to the configured amount
-    local npcCount = math.min(NPC_CONFIG.NumberOfNPCs, #spawnPositions)
-    print("Spawning " .. npcCount .. " NPCs using dummy: " .. NPC_CONFIG.DummyName)
-    
-    for i = 1, npcCount do
-        local spawnPos = spawnPositions[i]
-        if NPC_CONFIG.SpawnOnWaypoints and #spawnPositions > NPC_CONFIG.NumberOfNPCs then
-            -- If we have more waypoints than NPCs, randomly select waypoints
-            spawnPos = spawnPositions[math.random(1, #spawnPositions)]
-        end
-        
-        print("Spawning NPC " .. i .. " at position: " .. tostring(spawnPos))
-        SpawnNPCFromDummy(spawnPos)
-        wait(0.5) -- Small delay between spawns
-    end
-    
-    print("Finished spawning " .. #SpawnedNPCs .. " NPCs in folder: " .. NPCFolder.Name)
-end
-
--- Cleanup function
-local function CleanupNPCs()
-    for _, npc in pairs(SpawnedNPCs) do
-        if npc.Character and npc.Character.Parent then
-            npc.Character:Destroy()
-        end
-    end
-    SpawnedNPCs = {}
-    
-    if NPCFolder then
-        for _, child in pairs(NPCFolder:GetChildren()) do
-            if child:IsA("Model") then
-                child:Destroy()
-            end
-        end
-    end
-    
-    print("Cleaned up all NPCs")
-end
-
--- Example usage: Spawn NPCs based on configuration
-spawn(SpawnMultipleNPCs)
-
--- Create some example waypoint parts (remove this if you're placing them manually)
-spawn(function()
-    wait(1)
-    local waypointPositions = {
-        Vector3.new(20, 1, 20),
-        Vector3.new(-20, 1, 20),
-        Vector3.new(-20, 1, -20),
-        Vector3.new(20, 1, -20),
-        Vector3.new(0, 1, 30),
-        Vector3.new(30, 1, 0),
-        Vector3.new(0, 1, -30),
-        Vector3.new(-30, 1, 0)
-    }
-    
-    for i, pos in ipairs(waypointPositions) do
-        local waypoint = Instance.new("Part")
-        waypoint.Name = "NPCWaypoint"
-        waypoint.Size = Vector3.new(4, 1, 4)
-        waypoint.Position = pos
-        waypoint.Color = Color3.new(0, 1, 0)
-        waypoint.Material = Enum.Material.Neon
-        waypoint.CanCollide = false
-        waypoint.Anchored = true
-        waypoint.Parent = workspace
-    end
-end)
-
--- Commands for testing (you can call these from command bar)
--- CleanupNPCs() -- Removes all spawned NPCs
--- SpawnMultipleNPCs() -- Spawns new set of NPCs
