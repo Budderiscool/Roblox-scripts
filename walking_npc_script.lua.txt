@@ -18,21 +18,155 @@ local NPC_CONFIG = {
 	AvoidanceStrength = 1.5, -- How much to bend path away from threats
 	-- Waypoint settings
 	NPCPointsFolderName = "NPCPoints", -- Name of folder containing waypoint parts
+	JobSitesFolderName = "JobSites", -- Name of folder containing job site parts
 	-- Chain path settings
 	MinChainLength = 1, -- Minimum number of waypoints in a chain
 	MaxChainLength = 12, -- Maximum number of waypoints in a chain
 	MaxWaypointDistance = 30, -- Maximum distance between connected waypoints
 	ChainConnectionDistance = 10, -- Distance to consider waypoints as "connected"
+	-- Time system settings
+	TimeScale = 1, -- Time multiplier (1 = real time, 60 = 1 minute = 1 hour)
+	DayLengthMinutes = 24, -- Length of a full day in real minutes (when TimeScale = 60)
 	-- Debug settings
 	DebugPrints = false, -- Set to false to disable print statements
 	PreventTeleporting = true -- Prevent NPCs from teleporting when hurt
 }
 
--- NPC Class
+-- Time System
+local TimeSystem = {}
+TimeSystem.__index = TimeSystem
+
+function TimeSystem.new(config)
+	local self = setmetatable({}, TimeSystem)
+
+	self.Config = config or NPC_CONFIG
+	self.StartTime = tick()
+	self.CurrentDay = 1
+
+	-- Time format: hours (0-23), minutes (0-59)
+	self.CurrentTime = {hour = 6, minute = 0} -- Start at 6:00 AM
+
+	-- Callbacks for time events
+	self.TimeCallbacks = {} -- {hour = {minute = {callback1, callback2, ...}}}
+
+	-- Start the time update loop
+	self:StartTimeLoop()
+
+	return self
+end
+
+function TimeSystem:GetCurrentTime()
+	return self.CurrentTime.hour, self.CurrentTime.minute
+end
+
+function TimeSystem:GetTimeString()
+	local hour = self.CurrentTime.hour
+	local minute = self.CurrentTime.minute
+	local ampm = hour >= 12 and "PM" or "AM"
+	local displayHour = hour == 0 and 12 or (hour > 12 and hour - 12 or hour)
+	return string.format("%d:%02d %s", displayHour, minute, ampm)
+end
+
+function TimeSystem:RegisterTimeCallback(hour, minute, callback)
+	if not self.TimeCallbacks[hour] then
+		self.TimeCallbacks[hour] = {}
+	end
+	if not self.TimeCallbacks[hour][minute] then
+		self.TimeCallbacks[hour][minute] = {}
+	end
+	table.insert(self.TimeCallbacks[hour][minute], callback)
+end
+
+function TimeSystem:StartTimeLoop()
+	spawn(function()
+		while true do
+			-- Calculate elapsed time
+			local realElapsed = tick() - self.StartTime
+			local gameElapsed = realElapsed * self.Config.TimeScale
+
+			-- Convert to game time
+			local totalMinutes = gameElapsed / 60
+			local dayMinutes = totalMinutes % (self.Config.DayLengthMinutes * 60)
+
+			local newHour = math.floor(dayMinutes / 60) % 24
+			local newMinute = math.floor(dayMinutes % 60)
+
+			-- Check if time has changed
+			if newHour ~= self.CurrentTime.hour or newMinute ~= self.CurrentTime.minute then
+				local oldHour = self.CurrentTime.hour
+				local oldMinute = self.CurrentTime.minute
+
+				self.CurrentTime.hour = newHour
+				self.CurrentTime.minute = newMinute
+
+				-- Check for day change
+				if newHour < oldHour or (newHour == oldHour and newMinute < oldMinute) then
+					self.CurrentDay = self.CurrentDay + 1
+				end
+
+				-- Trigger callbacks
+				self:TriggerTimeCallbacks(newHour, newMinute)
+
+				if self.Config.DebugPrints then
+					print("Time: " .. self:GetTimeString() .. " (Day " .. self.CurrentDay .. ")")
+				end
+			end
+
+			wait(0.1)
+		end
+	end)
+end
+
+function TimeSystem:TriggerTimeCallbacks(hour, minute)
+	if self.TimeCallbacks[hour] and self.TimeCallbacks[hour][minute] then
+		for _, callback in ipairs(self.TimeCallbacks[hour][minute]) do
+			spawn(function()
+				callback(hour, minute, self.CurrentDay)
+			end)
+		end
+	end
+end
+
+-- Job Schedule Class
+local JobSchedule = {}
+JobSchedule.__index = JobSchedule
+
+function JobSchedule.new(jobSiteName, startHour, startMinute, durationMinutes)
+	local self = setmetatable({}, JobSchedule)
+
+	self.JobSiteName = jobSiteName
+	self.StartHour = startHour
+	self.StartMinute = startMinute
+	self.DurationMinutes = durationMinutes
+
+	-- Calculate end time
+	local totalStartMinutes = startHour * 60 + startMinute
+	local totalEndMinutes = totalStartMinutes + durationMinutes
+
+	self.EndHour = math.floor(totalEndMinutes / 60) % 24
+	self.EndMinute = totalEndMinutes % 60
+
+	return self
+end
+
+function JobSchedule:IsActiveAt(hour, minute)
+	local currentTotalMinutes = hour * 60 + minute
+	local startTotalMinutes = self.StartHour * 60 + self.StartMinute
+	local endTotalMinutes = self.EndHour * 60 + self.EndMinute
+
+	-- Handle overnight jobs
+	if endTotalMinutes < startTotalMinutes then
+		return currentTotalMinutes >= startTotalMinutes or currentTotalMinutes <= endTotalMinutes
+	else
+		return currentTotalMinutes >= startTotalMinutes and currentTotalMinutes <= endTotalMinutes
+	end
+end
+
+-- Enhanced NPC Class with Job System
 local NPC = {}
 NPC.__index = NPC
 
-function NPC.new(character, config)
+function NPC.new(character, config, timeSystem)
 	local self = setmetatable({}, NPC)
 
 	self.Character = character
@@ -47,27 +181,36 @@ function NPC.new(character, config)
 	end
 
 	self.Config = config or NPC_CONFIG
+	self.TimeSystem = timeSystem
 
-	-- State management
-	self.State = "Wandering" -- "Wandering", "Fleeing", "Returning"
+	-- State management - Added "Working" state
+	self.State = "Wandering" -- "Wandering", "Fleeing", "Returning", "GoingToWork", "Working", "LeavingWork"
 	self.OriginalPosition = self.RootPart.Position
-	self.OriginalCFrame = self.RootPart.CFrame -- Store original CFrame to prevent teleporting
+	self.OriginalCFrame = self.RootPart.CFrame
 	self.CurrentPath = nil
 	self.LastPathUpdate = 0
 	self.FleeStartTime = 0
 	self.ThreatPlayer = nil
 
-	-- Chain pathfinding system
-	self.CurrentChain = {} -- Current sequence of waypoints to follow
-	self.CurrentChainIndex = 1 -- Index in the current chain
-	self.WaypointChains = {} -- All possible chains of waypoints
+	-- Job system
+	self.JobSchedules = {} -- Array of JobSchedule objects
+	self.CurrentJob = nil
+	self.JobSites = {} -- {jobSiteName = part}
+	self.WorkStartTime = 0
 
-	-- Store the chain and index before fleeing so we can return to it
+	-- Chain pathfinding system
+	self.CurrentChain = {}
+	self.CurrentChainIndex = 1
+	self.WaypointChains = {}
+
+	-- Store chain before work/fleeing
+	self.PreWorkChain = nil
+	self.PreWorkChainIndex = 1
 	self.PreFleeChain = nil
 	self.PreFleeChainIndex = 1
 
 	-- Player memory system
-	self.RememberedThreats = {} -- {playerName = {lastSeen = tick(), dangerLevel = number}}
+	self.RememberedThreats = {}
 
 	-- Pathfinding setup
 	self.PathfindingAgent = {
@@ -77,17 +220,217 @@ function NPC.new(character, config)
 		WaypointSpacing = 4
 	}
 
-	-- Setup waypoints from NPCPoints folder
+	-- Setup systems
 	self:SetupWaypoints()
-
-	-- Setup injury detection
+	self:SetupJobSites()
 	self:SetupInjuryDetection()
+	self:SetupJobScheduling()
 
 	-- Start the main loop
 	self:StartMainLoop()
 
 	return self
 end
+
+function NPC:SetupJobSites()
+	-- Find JobSites folder
+	local jobSitesFolder = workspace:FindFirstChild(self.Config.JobSitesFolderName)
+
+	if not jobSitesFolder then
+		if self.Config.DebugPrints then
+			warn("JobSites folder not found in workspace! NPCs won't have jobs.")
+		end
+		return
+	end
+
+	-- Get all job site parts
+	for _, child in pairs(jobSitesFolder:GetChildren()) do
+		if child:IsA("BasePart") then
+			self.JobSites[child.Name] = child
+		end
+	end
+
+	if self.Config.DebugPrints then
+		print(self.Character.Name .. " found " .. #self.JobSites .. " job sites")
+	end
+end
+
+function NPC:AddJobSchedule(jobSiteName, startHour, startMinute, durationMinutes)
+	local schedule = JobSchedule.new(jobSiteName, startHour, startMinute, durationMinutes)
+	table.insert(self.JobSchedules, schedule)
+
+	if self.Config.DebugPrints then
+		print(self.Character.Name .. " scheduled to work at " .. jobSiteName .. 
+			" from " .. startHour .. ":" .. string.format("%02d", startMinute) .. 
+			" for " .. durationMinutes .. " minutes")
+	end
+end
+
+function NPC:SetupJobScheduling()
+	if not self.TimeSystem then return end
+
+	-- Check for work every minute
+	spawn(function()
+		while self.Character and self.Character.Parent do
+			local hour, minute = self.TimeSystem:GetCurrentTime()
+			self:CheckWorkSchedule(hour, minute)
+			wait(60 / self.Config.TimeScale) -- Check every game minute
+		end
+	end)
+end
+
+function NPC:CheckWorkSchedule(hour, minute)
+	-- Don't interrupt fleeing
+	if self.State == "Fleeing" then return end
+
+	-- Check if we should be working
+	for _, schedule in ipairs(self.JobSchedules) do
+		if schedule:IsActiveAt(hour, minute) then
+			if self.State ~= "Working" and self.State ~= "GoingToWork" then
+				self:StartWork(schedule)
+			end
+			return
+		end
+	end
+
+	-- Check if we should stop working
+	if self.State == "Working" or self.State == "GoingToWork" then
+		local shouldWork = false
+		for _, schedule in ipairs(self.JobSchedules) do
+			if schedule:IsActiveAt(hour, minute) then
+				shouldWork = true
+				break
+			end
+		end
+
+		if not shouldWork then
+			self:EndWork()
+		end
+	end
+end
+
+function NPC:StartWork(schedule)
+	if not self.JobSites[schedule.JobSiteName] then
+		if self.Config.DebugPrints then
+			warn(self.Character.Name .. " cannot find job site: " .. schedule.JobSiteName)
+		end
+		return
+	end
+
+	-- Save current wandering state
+	self.PreWorkChain = self.CurrentChain
+	self.PreWorkChainIndex = self.CurrentChainIndex
+
+	self.CurrentJob = schedule
+	self.State = "GoingToWork"
+	self.WorkStartTime = tick()
+
+	if self.Config.DebugPrints then
+		print(self.Character.Name .. " is going to work at " .. schedule.JobSiteName)
+	end
+end
+
+function NPC:EndWork()
+	if self.Config.DebugPrints then
+		print(self.Character.Name .. " is leaving work")
+	end
+
+	self.State = "LeavingWork"
+	self.CurrentJob = nil
+end
+
+function NPC:GetJobSitePosition()
+	if not self.CurrentJob or not self.JobSites[self.CurrentJob.JobSiteName] then
+		return self.OriginalPosition
+	end
+
+	return self.JobSites[self.CurrentJob.JobSiteName].Position
+end
+
+-- Update the existing methods to handle new states
+function NPC:UpdateGoingToWork()
+	local jobSitePos = self:GetJobSitePosition()
+	local distance = (self.RootPart.Position - jobSitePos).Magnitude
+
+	if distance <= self.Config.WaypointTolerance then
+		-- Arrived at work
+		self.State = "Working"
+		self.Humanoid:MoveTo(self.RootPart.Position) -- Stop moving
+
+		if self.Config.DebugPrints then
+			print(self.Character.Name .. " arrived at work")
+		end
+	else
+		-- Path to job site
+		local currentTime = tick()
+		if currentTime - self.LastPathUpdate > self.Config.PathUpdateInterval then
+			local path = self:CreatePath(jobSitePos)
+			if path then
+				self:FollowPath(path)
+			else
+				self.Humanoid:MoveTo(jobSitePos)
+			end
+			self.LastPathUpdate = currentTime
+		end
+	end
+end
+
+function NPC:UpdateWorking()
+	-- NPC stands at job site and occasionally moves slightly
+	if math.random(1, 100) <= 2 then -- 2% chance per update to move slightly
+		local jobSitePos = self:GetJobSitePosition()
+		local randomOffset = Vector3.new(
+			math.random(-3, 3),
+			0,
+			math.random(-3, 3)
+		)
+		self.Humanoid:MoveTo(jobSitePos + randomOffset)
+	end
+end
+
+function NPC:UpdateLeavingWork()
+	-- Return to where we were wandering before work
+	local returnDestination
+	if self.PreWorkChain and #self.PreWorkChain > 0 then
+		local closestIndex = self:FindClosestWaypointInChain(self.PreWorkChain)
+		returnDestination = self.PreWorkChain[closestIndex].Position
+	else
+		returnDestination = self.OriginalPosition
+	end
+
+	local distance = (self.RootPart.Position - returnDestination).Magnitude
+
+	if distance <= self.Config.WaypointTolerance then
+		-- Back to wandering area
+		if self.PreWorkChain and #self.PreWorkChain > 0 then
+			self.CurrentChain = self.PreWorkChain
+			self.CurrentChainIndex = self:FindClosestWaypointInChain(self.PreWorkChain)
+		end
+
+		self.State = "Wandering"
+		self.PreWorkChain = nil
+		self.PreWorkChainIndex = 1
+
+		if self.Config.DebugPrints then
+			print(self.Character.Name .. " returned to wandering")
+		end
+	else
+		-- Path back to wandering area
+		local currentTime = tick()
+		if currentTime - self.LastPathUpdate > self.Config.PathUpdateInterval then
+			local path = self:CreatePath(returnDestination)
+			if path then
+				self:FollowPath(path)
+			else
+				self.Humanoid:MoveTo(returnDestination)
+			end
+			self.LastPathUpdate = currentTime
+		end
+	end
+end
+
+-- [Include all the original methods here - SetupWaypoints, GenerateWaypointChains, etc.]
+-- For brevity, I'm showing the key new methods. The original methods remain the same.
 
 function NPC:SetupWaypoints()
 	-- Find NPCPoints folder
@@ -331,11 +674,25 @@ function NPC:SetupInjuryDetection()
 end
 
 function NPC:OnInjured()
+	-- Don't flee if already fleeing or at work (unless severely threatened)
 	if self.State == "Fleeing" then return end
 
-	-- Store current path state before fleeing so we can return to it
-	self.PreFleeChain = self.CurrentChain
-	self.PreFleeChainIndex = self.CurrentChainIndex
+	-- If at work, require more damage to flee
+	if self.State == "Working" or self.State == "GoingToWork" then
+		if self.Humanoid.Health > self.Humanoid.MaxHealth * 0.7 then
+			return -- Don't flee from work unless significantly hurt
+		end
+	end
+
+	-- Store current state before fleeing
+	if self.State == "Working" or self.State == "GoingToWork" or self.State == "LeavingWork" then
+		-- Remember work state to return to it later
+		self.PreFleeState = self.State
+		self.PreFleeJob = self.CurrentJob
+	else
+		self.PreFleeChain = self.CurrentChain
+		self.PreFleeChainIndex = self.CurrentChainIndex
+	end
 
 	-- Find the closest player as the threat
 	local closestPlayer = self:FindClosestPlayer()
@@ -349,7 +706,7 @@ function NPC:OnInjured()
 		self.Humanoid.WalkSpeed = self.Config.RunSpeed
 
 		if self.Config.DebugPrints then
-			print(self.Character.Name .. " is fleeing and will return to waypoint " .. self.PreFleeChainIndex .. " of " .. #self.PreFleeChain)
+			print(self.Character.Name .. " is fleeing from work/wandering")
 		end
 	end
 end
@@ -433,38 +790,6 @@ function NPC:GetAvoidanceAdjustedDestination(originalDestination)
 	end
 
 	local avoidanceVector = Vector3.new(0, 0, 0)
-	local myPos = self.RootPart.Position
-
-	-- Calculate avoidance vector based on all nearby threats
-	for _, threat in ipairs(threats) do
-		local threatPos = threat.position
-		local directionAway = (myPos - threatPos).Unit
-		local influence = (self.Config.AvoidanceDistance - threat.distance) / self.Config.AvoidanceDistance
-		influence = influence * threat.dangerLevel * self.Config.AvoidanceStrength
-
-		avoidanceVector = avoidanceVector + (directionAway * influence * 20)
-	end
-
-	-- Apply avoidance to destination
-	local adjustedDestination = originalDestination + avoidanceVector
-
-	-- Make sure the adjusted destination is still reasonable (not too far off course)
-	local maxDeviation = 30
-	local deviation = (adjustedDestination - originalDestination).Magnitude
-	if deviation > maxDeviation then
-		local deviationDirection = (adjustedDestination - originalDestination).Unit
-		adjustedDestination = originalDestination + (deviationDirection * maxDeviation)
-	end
-
-	return adjustedDestination
-end
-
-function NPC:GetFleeDestination()
-	if not self.ThreatPlayer or not self.ThreatPlayer.Character then
-		return self.OriginalPosition
-	end
-
-	local threatPos = self.ThreatPlayer.Character.HumanoidRootPart.Position
 	local myPos = self.RootPart.Position
 	local fleeDirection = (myPos - threatPos).Unit
 
@@ -610,42 +935,55 @@ function NPC:UpdateFleeing()
 end
 
 function NPC:UpdateReturning()
-	-- Get the return destination (closest waypoint in the pre-flee chain)
+	-- Determine what to return to based on what we were doing before fleeing
 	local returnDestination
-	if self.PreFleeChain and #self.PreFleeChain > 0 then
-		-- Find the closest waypoint in the saved chain to return to
+
+	if self.PreFleeState and (self.PreFleeState == "Working" or self.PreFleeState == "GoingToWork") then
+		-- Return to work if we were working
+		if self.PreFleeJob then
+			returnDestination = self:GetJobSitePosition()
+		else
+			returnDestination = self.OriginalPosition
+		end
+	elseif self.PreFleeChain and #self.PreFleeChain > 0 then
+		-- Return to wandering
 		local closestIndex = self:FindClosestWaypointInChain(self.PreFleeChain)
 		returnDestination = self.PreFleeChain[closestIndex].Position
-
-		if self.Config.DebugPrints then
-			print(self.Character.Name .. " returning to waypoint " .. closestIndex .. " in saved chain")
-		end
 	else
-		-- Fallback to original position if no chain was saved
+		-- Fallback to original position
 		returnDestination = self.OriginalPosition
 	end
 
 	local distanceToReturn = (self.RootPart.Position - returnDestination).Magnitude
 
 	if distanceToReturn < self.Config.WaypointTolerance then
-		-- Arrived back at the waypoint chain, resume wandering from where we left off
+		-- Arrived back, restore previous state
 		wait(self.Config.ReturnDelay)
 
-		-- Restore the pre-flee chain and continue from the closest waypoint
-		if self.PreFleeChain and #self.PreFleeChain > 0 then
+		if self.PreFleeState and (self.PreFleeState == "Working" or self.PreFleeState == "GoingToWork") then
+			-- Resume work
+			self.State = self.PreFleeState
+			self.CurrentJob = self.PreFleeJob
+		elseif self.PreFleeChain and #self.PreFleeChain > 0 then
+			-- Resume wandering
 			self.CurrentChain = self.PreFleeChain
 			self.CurrentChainIndex = self:FindClosestWaypointInChain(self.PreFleeChain)
-
-			if self.Config.DebugPrints then
-				print(self.Character.Name .. " resumed chain at waypoint " .. self.CurrentChainIndex)
-			end
+			self.State = "Wandering"
+		else
+			self.State = "Wandering"
 		end
 
-		self.State = "Wandering"
+		-- Clean up flee state
 		self.ThreatPlayer = nil
 		self.PreFleeChain = nil
 		self.PreFleeChainIndex = 1
+		self.PreFleeState = nil
+		self.PreFleeJob = nil
 		self.Humanoid.Health = self.Humanoid.MaxHealth -- Heal the NPC
+
+		if self.Config.DebugPrints then
+			print(self.Character.Name .. " returned from fleeing")
+		end
 	else
 		-- Path back to the return destination
 		local currentTime = tick()
@@ -670,6 +1008,12 @@ function NPC:StartMainLoop()
 				self:UpdateFleeing()
 			elseif self.State == "Returning" then
 				self:UpdateReturning()
+			elseif self.State == "GoingToWork" then
+				self:UpdateGoingToWork()
+			elseif self.State == "Working" then
+				self:UpdateWorking()
+			elseif self.State == "LeavingWork" then
+				self:UpdateLeavingWork()
 			end
 
 			wait(0.1) -- Update frequency
@@ -677,7 +1021,10 @@ function NPC:StartMainLoop()
 	end)
 end
 
--- Initialize the NPC
+-- Global time system instance
+local GlobalTimeSystem = TimeSystem.new(NPC_CONFIG)
+
+-- Initialize the NPC with job scheduling
 local function InitializeNPC()
 	-- Wait a moment for the character to fully load
 	wait(1)
@@ -704,11 +1051,29 @@ local function InitializeNPC()
 		return
 	end
 
-	-- Create the NPC behavior
-	local npc = NPC.new(character, NPC_CONFIG)
+	-- Create the NPC behavior with time system
+	local npc = NPC.new(character, NPC_CONFIG, GlobalTimeSystem)
 	if npc then
+		-- Example job schedules - customize these for each NPC
+		-- You can add different jobs for different NPCs by checking character.Name
+
+		if character.Name == "Worker1" then
+			-- Work at "Factory" from 9:00 AM to 5:00 PM (8 hours = 480 minutes)
+			npc:AddJobSchedule("Factory", 9, 0, 480)
+		elseif character.Name == "ShopKeeper" then
+			-- Work at "Shop" from 8:00 AM to 6:00 PM (10 hours = 600 minutes)
+			npc:AddJobSchedule("Shop", 8, 0, 600)
+		elseif character.Name == "NightGuard" then
+			-- Work at "Security" from 10:00 PM to 6:00 AM (8 hours = 480 minutes)
+			npc:AddJobSchedule("Security", 22, 0, 480)
+		else
+			-- Default job - work at "Office" from 9:00 AM to 5:00 PM
+			npc:AddJobSchedule("Office", 9, 0, 480)
+		end
+
 		if NPC_CONFIG.DebugPrints then
-			print("Successfully initialized NPC behavior for " .. character.Name)
+			print("Successfully initialized NPC behavior with time system for " .. character.Name)
+			print("Current time: " .. GlobalTimeSystem:GetTimeString())
 		end
 	else
 		if NPC_CONFIG.DebugPrints then
@@ -717,5 +1082,85 @@ local function InitializeNPC()
 	end
 end
 
+-- Create a GUI to display the current time (optional)
+local function CreateTimeDisplay()
+	local Players = game:GetService("Players")
+	local player = Players.LocalPlayer
+
+	if not player then return end
+
+	local playerGui = player:WaitForChild("PlayerGui")
+
+	-- Create ScreenGui
+	local screenGui = Instance.new("ScreenGui")
+	screenGui.Name = "TimeDisplay"
+	screenGui.Parent = playerGui
+
+	-- Create Frame
+	local frame = Instance.new("Frame")
+	frame.Size = UDim2.new(0, 200, 0, 50)
+	frame.Position = UDim2.new(0, 10, 0, 10)
+	frame.BackgroundColor3 = Color3.new(0, 0, 0)
+	frame.BackgroundTransparency = 0.3
+	frame.BorderSizePixel = 0
+	frame.Parent = screenGui
+
+	-- Create TextLabel
+	local timeLabel = Instance.new("TextLabel")
+	timeLabel.Size = UDim2.new(1, 0, 1, 0)
+	timeLabel.Position = UDim2.new(0, 0, 0, 0)
+	timeLabel.BackgroundTransparency = 1
+	timeLabel.Text = "Time: " .. GlobalTimeSystem:GetTimeString()
+	timeLabel.TextColor3 = Color3.new(1, 1, 1)
+	timeLabel.TextScaled = true
+	timeLabel.Font = Enum.Font.SourceSansBold
+	timeLabel.Parent = frame
+
+	-- Update the time display
+	spawn(function()
+		while screenGui and screenGui.Parent do
+			timeLabel.Text = "Time: " .. GlobalTimeSystem:GetTimeString()
+			wait(1)
+		end
+	end)
+end
+
 -- Start the NPC initialization
 spawn(InitializeNPC)
+
+-- Create time display if this is running on the client
+if game:GetService("RunService"):IsClient() then
+	spawn(CreateTimeDisplay)
+end.RootPart.Position
+
+-- Calculate avoidance vector based on all nearby threats
+for _, threat in ipairs(threats) do
+	local threatPos = threat.position
+	local directionAway = (myPos - threatPos).Unit
+	local influence = (self.Config.AvoidanceDistance - threat.distance) / self.Config.AvoidanceDistance
+	influence = influence * threat.dangerLevel * self.Config.AvoidanceStrength
+
+	avoidanceVector = avoidanceVector + (directionAway * influence * 20)
+end
+
+-- Apply avoidance to destination
+local adjustedDestination = originalDestination + avoidanceVector
+
+-- Make sure the adjusted destination is still reasonable (not too far off course)
+local maxDeviation = 30
+local deviation = (adjustedDestination - originalDestination).Magnitude
+if deviation > maxDeviation then
+	local deviationDirection = (adjustedDestination - originalDestination).Unit
+	adjustedDestination = originalDestination + (deviationDirection * maxDeviation)
+end
+
+return adjustedDestination
+end
+
+function NPC:GetFleeDestination()
+	if not self.ThreatPlayer or not self.ThreatPlayer.Character then
+		return self.OriginalPosition
+	end
+
+	local threatPos = self.ThreatPlayer.Character.HumanoidRootPart.Position
+	local myPos = self
