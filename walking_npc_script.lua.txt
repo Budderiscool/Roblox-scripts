@@ -1,0 +1,604 @@
+-- Realistic Walking NPC Script for Roblox
+-- Place this script in ServerScriptService
+
+local RunService = game:GetService("RunService")
+local PathfindingService = game:GetService("PathfindingService")
+local Players = game:GetService("Players")
+local Debris = game:GetService("Debris")
+
+-- Configuration
+local NPC_CONFIG = {
+    WalkSpeed = 8,
+    RunSpeed = 16,
+    FleeDistance = 50,
+    ReturnDelay = 3,
+    PathUpdateInterval = 2,
+    UsePointToPoint = false, -- Set to true for point-to-point, false for part-based pathfinding
+    WaypointTolerance = 4,
+    MaxPathfindingRetries = 3,
+    -- New spawn configuration
+    NumberOfNPCs = 5, -- How many NPCs to spawn
+    SpawnOnWaypoints = true, -- Spawn NPCs at waypoint locations
+    -- Player memory and avoidance
+    MemoryDuration = 300, -- How long NPCs remember players (seconds)
+    AvoidanceDistance = 25, -- Distance to maintain from remembered threats
+    AvoidanceStrength = 1.5 -- How much to bend path away from threats
+}
+
+-- NPC Class
+local NPC = {}
+NPC.__index = NPC
+
+function NPC.new(character, config)
+    local self = setmetatable({}, NPC)
+    
+    self.Character = character
+    self.Humanoid = character:WaitForChild("Humanoid")
+    self.RootPart = character:WaitForChild("HumanoidRootPart")
+    self.Config = config or NPC_CONFIG
+    
+    -- State management
+    self.State = "Wandering" -- "Wandering", "Fleeing", "Returning"
+    self.OriginalPosition = self.RootPart.Position
+    self.CurrentPath = nil
+    self.CurrentWaypointIndex = 1
+    self.LastPathUpdate = 0
+    self.FleeStartTime = 0
+    self.ThreatPlayer = nil
+    
+    -- Player memory system
+    self.RememberedThreats = {} -- {playerName = {lastSeen = tick(), dangerLevel = number}}
+    self.CurrentTarget = nil
+    
+    -- Pathfinding setup
+    self.PathfindingAgent = {
+        AgentRadius = 2,
+        AgentHeight = 5,
+        AgentCanJump = true,
+        WaypointSpacing = 4
+    }
+    
+    -- Get waypoints based on configuration
+    if self.Config.UsePointToPoint then
+        self:SetupPointToPointWaypoints()
+    else
+        self:SetupPartBasedWaypoints()
+    end
+    
+    -- Setup injury detection
+    self:SetupInjuryDetection()
+    
+    -- Start the main loop
+    self:StartMainLoop()
+    
+    return self
+end
+
+function NPC:SetupPointToPointWaypoints()
+    -- Define waypoints around the spawn area
+    local center = self.OriginalPosition
+    self.Waypoints = {
+        center + Vector3.new(20, 0, 0),
+        center + Vector3.new(0, 0, 20),
+        center + Vector3.new(-20, 0, 0),
+        center + Vector3.new(0, 0, -20),
+        center + Vector3.new(15, 0, 15),
+        center + Vector3.new(-15, 0, 15),
+        center + Vector3.new(-15, 0, -15),
+        center + Vector3.new(15, 0, -15)
+    }
+    self.CurrentWaypointIndex = 1
+end
+
+function NPC:SetupPartBasedWaypoints()
+    -- Find all parts named "NPCWaypoint" in workspace
+    self.WaypointParts = {}
+    local function findWaypoints(parent)
+        for _, child in pairs(parent:GetChildren()) do
+            if child.Name == "NPCWaypoint" and child:IsA("BasePart") then
+                table.insert(self.WaypointParts, child)
+            end
+            findWaypoints(child)
+        end
+    end
+    findWaypoints(workspace)
+    
+    if #self.WaypointParts == 0 then
+        warn("No NPCWaypoint parts found! Creating default waypoints around spawn.")
+        self.Config.UsePointToPoint = true
+        self:SetupPointToPointWaypoints()
+    end
+end
+
+function NPC:SetupInjuryDetection()
+    -- Detect when NPC takes damage
+    self.Humanoid.HealthChanged:Connect(function(health)
+        if health < self.Humanoid.MaxHealth then
+            self:OnInjured()
+        end
+    end)
+    
+    -- Also detect when hit by tools/weapons
+    self.Character.ChildAdded:Connect(function(child)
+        if child:IsA("Tool") then
+            self:OnInjured()
+        end
+    end)
+end
+
+function NPC:OnInjured()
+    if self.State == "Fleeing" then return end
+    
+    -- Find the closest player as the threat
+    local closestPlayer = self:FindClosestPlayer()
+    if closestPlayer then
+        -- Remember this player as a threat
+        self:RememberThreat(closestPlayer)
+        
+        self.ThreatPlayer = closestPlayer
+        self.State = "Fleeing"
+        self.FleeStartTime = tick()
+        self.Humanoid.WalkSpeed = self.Config.RunSpeed
+        
+        -- Create a visual effect
+        self:CreateFleeEffect()
+        
+        print(self.Character.Name .. " was hurt by " .. closestPlayer.Name .. " and is now fleeing!")
+    end
+end
+
+function NPC:FindClosestPlayer()
+    local closestPlayer = nil
+    local closestDistance = math.huge
+    
+    for _, player in pairs(Players:GetPlayers()) do
+        if player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
+            local distance = (player.Character.HumanoidRootPart.Position - self.RootPart.Position).Magnitude
+            if distance < closestDistance then
+                closestDistance = distance
+                closestPlayer = player
+            end
+        end
+    end
+    
+    return closestPlayer
+end
+
+function NPC:CreateFleeEffect()
+    -- Create a red sphere above NPC's head to indicate fear
+    local effect = Instance.new("Part")
+    effect.Name = "FleeEffect"
+    effect.Size = Vector3.new(1, 1, 1)
+    effect.Shape = Enum.PartType.Ball
+    effect.Color = Color3.new(1, 0, 0)
+    effect.Material = Enum.Material.Neon
+    effect.CanCollide = false
+    effect.Anchored = true
+    effect.Parent = workspace
+    
+    local weld = Instance.new("WeldConstraint")
+    weld.Part0 = effect
+    weld.Part1 = self.Character:FindFirstChild("Head")
+    if weld.Part1 then
+        weld.Parent = effect
+        effect.CFrame = self.Character.Head.CFrame + Vector3.new(0, 2, 0)
+    end
+    
+    Debris:AddItem(effect, 3)
+end
+
+function NPC:RememberThreat(player)
+    local playerName = player.Name
+    if not self.RememberedThreats[playerName] then
+        self.RememberedThreats[playerName] = {
+            lastSeen = tick(),
+            dangerLevel = 1,
+            player = player
+        }
+    else
+        -- Increase danger level for repeat offenders
+        self.RememberedThreats[playerName].dangerLevel = self.RememberedThreats[playerName].dangerLevel + 1
+        self.RememberedThreats[playerName].lastSeen = tick()
+        self.RememberedThreats[playerName].player = player
+    end
+    
+    print(self.Character.Name .. " now remembers " .. playerName .. " as a threat (Danger Level: " .. 
+          self.RememberedThreats[playerName].dangerLevel .. ")")
+end
+
+function NPC:ForgetOldThreats()
+    local currentTime = tick()
+    for playerName, threatData in pairs(self.RememberedThreats) do
+        if currentTime - threatData.lastSeen > self.Config.MemoryDuration then
+            print(self.Character.Name .. " has forgotten about " .. playerName)
+            self.RememberedThreats[playerName] = nil
+        end
+    end
+end
+
+function NPC:GetNearbyThreats()
+    local nearbyThreats = {}
+    
+    for playerName, threatData in pairs(self.RememberedThreats) do
+        if threatData.player and threatData.player.Character and 
+           threatData.player.Character:FindFirstChild("HumanoidRootPart") then
+            
+            local distance = (threatData.player.Character.HumanoidRootPart.Position - self.RootPart.Position).Magnitude
+            if distance <= self.Config.AvoidanceDistance then
+                table.insert(nearbyThreats, {
+                    player = threatData.player,
+                    distance = distance,
+                    dangerLevel = threatData.dangerLevel,
+                    position = threatData.player.Character.HumanoidRootPart.Position
+                })
+            end
+        end
+    end
+    
+    return nearbyThreats
+end
+
+function NPC:GetAvoidanceAdjustedDestination(originalDestination)
+    local threats = self:GetNearbyThreats()
+    if #threats == 0 then
+        return originalDestination
+    end
+    
+    local avoidanceVector = Vector3.new(0, 0, 0)
+    local myPos = self.RootPart.Position
+    
+    -- Calculate avoidance vector based on all nearby threats
+    for _, threat in ipairs(threats) do
+        local threatPos = threat.position
+        local directionAway = (myPos - threatPos).Unit
+        local influence = (self.Config.AvoidanceDistance - threat.distance) / self.Config.AvoidanceDistance
+        influence = influence * threat.dangerLevel * self.Config.AvoidanceStrength
+        
+        avoidanceVector = avoidanceVector + (directionAway * influence * 20)
+    end
+    
+    -- Apply avoidance to destination
+    local adjustedDestination = originalDestination + avoidanceVector
+    
+    -- Make sure the adjusted destination is still reasonable (not too far off course)
+    local maxDeviation = 30
+    local deviation = (adjustedDestination - originalDestination).Magnitude
+    if deviation > maxDeviation then
+        local deviationDirection = (adjustedDestination - originalDestination).Unit
+        adjustedDestination = originalDestination + (deviationDirection * maxDeviation)
+    end
+    
+    return adjustedDestination
+end
+
+function NPC:GetFleeDestination()
+    if not self.ThreatPlayer or not self.ThreatPlayer.Character then
+        return self.OriginalPosition
+    end
+    
+    local threatPos = self.ThreatPlayer.Character.HumanoidRootPart.Position
+    local myPos = self.RootPart.Position
+    local fleeDirection = (myPos - threatPos).Unit
+    
+    -- Flee further away from players with higher danger levels
+    local dangerMultiplier = 1
+    if self.RememberedThreats[self.ThreatPlayer.Name] then
+        dangerMultiplier = self.RememberedThreats[self.ThreatPlayer.Name].dangerLevel
+    end
+    
+    local fleeDistance = self.Config.FleeDistance * dangerMultiplier
+    return myPos + fleeDirection * fleeDistance
+end
+
+function NPC:CreatePath(destination)
+    local path = PathfindingService:CreatePath(self.PathfindingAgent)
+    local success, errorMessage = pcall(function()
+        path:ComputeAsync(self.RootPart.Position, destination)
+    end)
+    
+    if success and path.Status == Enum.PathStatus.Success then
+        return path
+    else
+        warn("Path creation failed: " .. tostring(errorMessage))
+        return nil
+    end
+end
+
+function NPC:FollowPath(path)
+    if not path then return end
+    
+    local waypoints = path:GetWaypoints()
+    if #waypoints < 2 then return end
+    
+    self.Humanoid:MoveTo(waypoints[2].Position) -- Skip first waypoint (current position)
+    
+    -- Handle waypoint reached
+    local connection
+    connection = self.Humanoid.MoveToFinished:Connect(function(reached)
+        if reached and #waypoints > 2 then
+            table.remove(waypoints, 1)
+            if #waypoints > 1 then
+                self.Humanoid:MoveTo(waypoints[2].Position)
+            else
+                connection:Disconnect()
+            end
+        else
+            connection:Disconnect()
+        end
+    end)
+end
+
+function NPC:GetNextWaypoint()
+    if self.Config.UsePointToPoint then
+        if not self.Waypoints or #self.Waypoints == 0 then return self.OriginalPosition end
+        
+        local waypoint = self.Waypoints[self.CurrentWaypointIndex]
+        self.CurrentWaypointIndex = self.CurrentWaypointIndex + 1
+        if self.CurrentWaypointIndex > #self.Waypoints then
+            self.CurrentWaypointIndex = 1
+        end
+        return waypoint
+    else
+        if not self.WaypointParts or #self.WaypointParts == 0 then return self.OriginalPosition end
+        
+        local randomPart = self.WaypointParts[math.random(1, #self.WaypointParts)]
+        return randomPart.Position
+    end
+end
+
+function NPC:UpdateWandering()
+    -- Clean up old threat memories
+    self:ForgetOldThreats()
+    
+    local currentTime = tick()
+    if currentTime - self.LastPathUpdate > self.Config.PathUpdateInterval then
+        local destination = self:GetNextWaypoint()
+        
+        -- Adjust destination to avoid remembered threats
+        destination = self:GetAvoidanceAdjustedDestination(destination)
+        
+        local path = self:CreatePath(destination)
+        if path then
+            self:FollowPath(path)
+        else
+            -- Fallback: direct movement
+            self.Humanoid:MoveTo(destination)
+        end
+        self.LastPathUpdate = currentTime
+    end
+end
+
+function NPC:UpdateFleeing()
+    local currentTime = tick()
+    
+    -- Check if we should stop fleeing
+    if self.ThreatPlayer and self.ThreatPlayer.Character then
+        local distance = (self.ThreatPlayer.Character.HumanoidRootPart.Position - self.RootPart.Position).Magnitude
+        if distance > self.Config.FleeDistance * 1.5 or currentTime - self.FleeStartTime > 10 then
+            self.State = "Returning"
+            self.Humanoid.WalkSpeed = self.Config.WalkSpeed
+            return
+        end
+    else
+        self.State = "Returning"
+        self.Humanoid.WalkSpeed = self.Config.WalkSpeed
+        return
+    end
+    
+    -- Continue fleeing
+    if currentTime - self.LastPathUpdate > 1 then -- Update flee path more frequently
+        local fleeDestination = self:GetFleeDestination()
+        local path = self:CreatePath(fleeDestination)
+        if path then
+            self:FollowPath(path)
+        else
+            self.Humanoid:MoveTo(fleeDestination)
+        end
+        self.LastPathUpdate = currentTime
+    end
+end
+
+function NPC:UpdateReturning()
+    local distanceToOriginal = (self.RootPart.Position - self.OriginalPosition).Magnitude
+    
+    if distanceToOriginal < self.Config.WaypointTolerance then
+        -- Arrived back at original position, resume wandering
+        wait(self.Config.ReturnDelay)
+        self.State = "Wandering"
+        self.ThreatPlayer = nil
+        self.Humanoid.Health = self.Humanoid.MaxHealth -- Heal the NPC
+    else
+        -- Path back to original position
+        local currentTime = tick()
+        if currentTime - self.LastPathUpdate > self.Config.PathUpdateInterval then
+            local path = self:CreatePath(self.OriginalPosition)
+            if path then
+                self:FollowPath(path)
+            else
+                self.Humanoid:MoveTo(self.OriginalPosition)
+            end
+            self.LastPathUpdate = currentTime
+        end
+    end
+end
+
+function NPC:StartMainLoop()
+    spawn(function()
+        while self.Character.Parent do
+            if self.State == "Wandering" then
+                self:UpdateWandering()
+            elseif self.State == "Fleeing" then
+                self:UpdateFleeing()
+            elseif self.State == "Returning" then
+                self:UpdateReturning()
+            end
+            
+            wait(0.1) -- Update frequency
+        end
+    end)
+end
+
+-- NPC Management
+local SpawnedNPCs = {}
+local NPCCounter = 1
+
+-- Function to get all waypoint positions
+local function GetAllWaypointPositions()
+    local positions = {}
+    
+    if NPC_CONFIG.UsePointToPoint then
+        -- Use predefined positions around origin
+        local center = Vector3.new(0, 10, 0)
+        positions = {
+            center + Vector3.new(20, 0, 0),
+            center + Vector3.new(0, 0, 20),
+            center + Vector3.new(-20, 0, 0),
+            center + Vector3.new(0, 0, -20),
+            center + Vector3.new(15, 0, 15),
+            center + Vector3.new(-15, 0, 15),
+            center + Vector3.new(-15, 0, -15),
+            center + Vector3.new(15, 0, -15)
+        }
+    else
+        -- Find all NPCWaypoint parts
+        local function findWaypoints(parent)
+            for _, child in pairs(parent:GetChildren()) do
+                if child.Name == "NPCWaypoint" and child:IsA("BasePart") then
+                    table.insert(positions, child.Position + Vector3.new(0, 5, 0)) -- Spawn slightly above waypoint
+                end
+                findWaypoints(child)
+            end
+        end
+        findWaypoints(workspace)
+    end
+    
+    return positions
+end
+
+-- Function to spawn an NPC
+local function SpawnNPC(position, customConfig)
+    local config = customConfig or NPC_CONFIG
+    
+    -- Create NPC character
+    local npcModel = Instance.new("Model")
+    npcModel.Name = "WalkingNPC_" .. NPCCounter
+    NPCCounter = NPCCounter + 1
+    npcModel.Parent = workspace
+    
+    -- Create basic NPC parts
+    local humanoid = Instance.new("Humanoid")
+    humanoid.MaxHealth = 100
+    humanoid.Health = 100
+    humanoid.WalkSpeed = config.WalkSpeed
+    humanoid.Parent = npcModel
+    
+    local rootPart = Instance.new("Part")
+    rootPart.Name = "HumanoidRootPart"
+    rootPart.Size = Vector3.new(2, 2, 1)
+    rootPart.CFrame = CFrame.new(position)
+    rootPart.CanCollide = false
+    rootPart.Parent = npcModel
+    
+    local head = Instance.new("Part")
+    head.Name = "Head"
+    head.Size = Vector3.new(2, 1, 1)
+    head.CFrame = rootPart.CFrame + Vector3.new(0, 1.5, 0)
+    head.Parent = npcModel
+    
+    local torso = Instance.new("Part")
+    torso.Name = "Torso"
+    torso.Size = Vector3.new(2, 2, 1)
+    torso.CFrame = rootPart.CFrame
+    torso.Parent = npcModel
+    
+    -- Weld parts together
+    local headWeld = Instance.new("WeldConstraint")
+    headWeld.Part0 = rootPart
+    headWeld.Part1 = head
+    headWeld.Parent = rootPart
+    
+    local torsoWeld = Instance.new("WeldConstraint")
+    torsoWeld.Part0 = rootPart
+    torsoWeld.Part1 = torso
+    torsoWeld.Parent = rootPart
+    
+    -- Create the NPC behavior
+    local npc = NPC.new(npcModel, config)
+    table.insert(SpawnedNPCs, npc)
+    
+    return npc
+end
+
+-- Function to spawn multiple NPCs
+local function SpawnMultipleNPCs()
+    wait(2) -- Wait for game to load
+    
+    local spawnPositions = {}
+    
+    if NPC_CONFIG.SpawnOnWaypoints then
+        spawnPositions = GetAllWaypointPositions()
+        if #spawnPositions == 0 then
+            warn("No waypoint positions found! Creating default spawn positions.")
+            spawnPositions = {
+                Vector3.new(0, 10, 0),
+                Vector3.new(20, 10, 0),
+                Vector3.new(-20, 10, 0),
+                Vector3.new(0, 10, 20),
+                Vector3.new(0, 10, -20)
+            }
+        end
+    else
+        -- Generate random positions
+        for i = 1, NPC_CONFIG.NumberOfNPCs do
+            table.insert(spawnPositions, Vector3.new(math.random(-50, 50), 10, math.random(-50, 50)))
+        end
+    end
+    
+    -- Spawn NPCs up to the configured amount
+    local npcCount = math.min(NPC_CONFIG.NumberOfNPCs, #spawnPositions)
+    print("Spawning " .. npcCount .. " NPCs...")
+    
+    for i = 1, npcCount do
+        local spawnPos = spawnPositions[i]
+        if NPC_CONFIG.SpawnOnWaypoints and #spawnPositions > NPC_CONFIG.NumberOfNPCs then
+            -- If we have more waypoints than NPCs, randomly select waypoints
+            spawnPos = spawnPositions[math.random(1, #spawnPositions)]
+        end
+        
+        print("Spawning NPC " .. i .. " at position: " .. tostring(spawnPos))
+        SpawnNPC(spawnPos)
+        wait(0.5) -- Small delay between spawns
+    end
+    
+    print("Finished spawning " .. npcCount .. " NPCs!")
+end
+
+-- Example usage: Spawn NPCs based on configuration
+spawn(SpawnMultipleNPCs)
+
+-- Create some example waypoint parts (remove this if you're placing them manually)
+spawn(function()
+    wait(1)
+    local waypointPositions = {
+        Vector3.new(20, 1, 20),
+        Vector3.new(-20, 1, 20),
+        Vector3.new(-20, 1, -20),
+        Vector3.new(20, 1, -20),
+        Vector3.new(0, 1, 30),
+        Vector3.new(30, 1, 0),
+        Vector3.new(0, 1, -30),
+        Vector3.new(-30, 1, 0)
+    }
+    
+    for i, pos in ipairs(waypointPositions) do
+        local waypoint = Instance.new("Part")
+        waypoint.Name = "NPCWaypoint"
+        waypoint.Size = Vector3.new(4, 1, 4)
+        waypoint.Position = pos
+        waypoint.Color = Color3.new(0, 1, 0)
+        waypoint.Material = Enum.Material.Neon
+        waypoint.CanCollide = false
+        waypoint.Anchored = true
+        waypoint.Parent = workspace
+    end
+end)
