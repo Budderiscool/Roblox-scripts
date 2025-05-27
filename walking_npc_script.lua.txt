@@ -1,4 +1,3 @@
-
 local RunService = game:GetService("RunService")
 local PathfindingService = game:GetService("PathfindingService")
 local Players = game:GetService("Players")
@@ -9,7 +8,7 @@ local NPC_CONFIG = {
 	WalkSpeed = 8,
 	RunSpeed = 16,
 	FleeDistance = 50,
-	ReturnDelay = 3,
+	ReturnDelay = 4,
 	PathUpdateInterval = 2,
 	WaypointTolerance = 4,
 	MaxPathfindingRetries = 3,
@@ -20,12 +19,12 @@ local NPC_CONFIG = {
 	-- Waypoint settings
 	NPCPointsFolderName = "NPCPoints", -- Name of folder containing waypoint parts
 	-- Chain path settings
-	MinChainLength = 3, -- Minimum number of waypoints in a chain
-	MaxChainLength = 8, -- Maximum number of waypoints in a chain
+	MinChainLength = 1, -- Minimum number of waypoints in a chain
+	MaxChainLength = 12, -- Maximum number of waypoints in a chain
 	MaxWaypointDistance = 30, -- Maximum distance between connected waypoints
-	ChainConnectionDistance = 25, -- Distance to consider waypoints as "connected"
+	ChainConnectionDistance = 10, -- Distance to consider waypoints as "connected"
 	-- Debug settings
-	DebugPrints = true, -- Set to false to disable print statements
+	DebugPrints = false, -- Set to false to disable print statements
 	PreventTeleporting = true -- Prevent NPCs from teleporting when hurt
 }
 
@@ -62,6 +61,10 @@ function NPC.new(character, config)
 	self.CurrentChain = {} -- Current sequence of waypoints to follow
 	self.CurrentChainIndex = 1 -- Index in the current chain
 	self.WaypointChains = {} -- All possible chains of waypoints
+
+	-- Store the chain and index before fleeing so we can return to it
+	self.PreFleeChain = nil
+	self.PreFleeChainIndex = 1
 
 	-- Player memory system
 	self.RememberedThreats = {} -- {playerName = {lastSeen = tick(), dangerLevel = number}}
@@ -330,6 +333,10 @@ end
 function NPC:OnInjured()
 	if self.State == "Fleeing" then return end
 
+	-- Store current path state before fleeing so we can return to it
+	self.PreFleeChain = self.CurrentChain
+	self.PreFleeChainIndex = self.CurrentChainIndex
+
 	-- Find the closest player as the threat
 	local closestPlayer = self:FindClosestPlayer()
 	if closestPlayer then
@@ -340,6 +347,10 @@ function NPC:OnInjured()
 		self.State = "Fleeing"
 		self.FleeStartTime = tick()
 		self.Humanoid.WalkSpeed = self.Config.RunSpeed
+
+		if self.Config.DebugPrints then
+			print(self.Character.Name .. " is fleeing and will return to waypoint " .. self.PreFleeChainIndex .. " of " .. #self.PreFleeChain)
+		end
 	end
 end
 
@@ -526,6 +537,26 @@ function NPC:GetNextWaypoint()
 	return self:GetCurrentWaypointInChain()
 end
 
+function NPC:FindClosestWaypointInChain(chain)
+	if not chain or #chain == 0 then
+		return 1
+	end
+
+	local closestIndex = 1
+	local closestDistance = math.huge
+	local myPos = self.RootPart.Position
+
+	for i, waypoint in ipairs(chain) do
+		local distance = (myPos - waypoint.Position).Magnitude
+		if distance < closestDistance then
+			closestDistance = distance
+			closestIndex = i
+		end
+	end
+
+	return closestIndex
+end
+
 function NPC:UpdateWandering()
 	-- Clean up old threat memories
 	self:ForgetOldThreats()
@@ -579,23 +610,51 @@ function NPC:UpdateFleeing()
 end
 
 function NPC:UpdateReturning()
-	local distanceToOriginal = (self.RootPart.Position - self.OriginalPosition).Magnitude
+	-- Get the return destination (closest waypoint in the pre-flee chain)
+	local returnDestination
+	if self.PreFleeChain and #self.PreFleeChain > 0 then
+		-- Find the closest waypoint in the saved chain to return to
+		local closestIndex = self:FindClosestWaypointInChain(self.PreFleeChain)
+		returnDestination = self.PreFleeChain[closestIndex].Position
 
-	if distanceToOriginal < self.Config.WaypointTolerance then
-		-- Arrived back at original position, resume wandering
+		if self.Config.DebugPrints then
+			print(self.Character.Name .. " returning to waypoint " .. closestIndex .. " in saved chain")
+		end
+	else
+		-- Fallback to original position if no chain was saved
+		returnDestination = self.OriginalPosition
+	end
+
+	local distanceToReturn = (self.RootPart.Position - returnDestination).Magnitude
+
+	if distanceToReturn < self.Config.WaypointTolerance then
+		-- Arrived back at the waypoint chain, resume wandering from where we left off
 		wait(self.Config.ReturnDelay)
+
+		-- Restore the pre-flee chain and continue from the closest waypoint
+		if self.PreFleeChain and #self.PreFleeChain > 0 then
+			self.CurrentChain = self.PreFleeChain
+			self.CurrentChainIndex = self:FindClosestWaypointInChain(self.PreFleeChain)
+
+			if self.Config.DebugPrints then
+				print(self.Character.Name .. " resumed chain at waypoint " .. self.CurrentChainIndex)
+			end
+		end
+
 		self.State = "Wandering"
 		self.ThreatPlayer = nil
+		self.PreFleeChain = nil
+		self.PreFleeChainIndex = 1
 		self.Humanoid.Health = self.Humanoid.MaxHealth -- Heal the NPC
 	else
-		-- Path back to original position
+		-- Path back to the return destination
 		local currentTime = tick()
 		if currentTime - self.LastPathUpdate > self.Config.PathUpdateInterval then
-			local path = self:CreatePath(self.OriginalPosition)
+			local path = self:CreatePath(returnDestination)
 			if path then
 				self:FollowPath(path)
 			else
-				self.Humanoid:MoveTo(self.OriginalPosition)
+				self.Humanoid:MoveTo(returnDestination)
 			end
 			self.LastPathUpdate = currentTime
 		end
