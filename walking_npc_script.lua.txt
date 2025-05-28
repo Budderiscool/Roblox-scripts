@@ -1,73 +1,103 @@
 local npc = script.Parent
 local humanoid = npc:WaitForChild("Humanoid")
 local hrp = npc:WaitForChild("HumanoidRootPart")
-local Lighting = game:GetService("Lighting")
+
+local jobPart = workspace:WaitForChild("JobPart")
+local homePart = workspace:WaitForChild("HomePart")
+
 local PathfindingService = game:GetService("PathfindingService")
+local Lighting = game:GetService("Lighting")
 
-local npcPointsFolder = workspace:WaitForChild("NPCPoints")
-local jobSitesFolder = workspace:WaitForChild("JobSites")
-local assignedJob = npc:WaitForChild("AssignedJob")
+local jobStart = 9 * 60    -- 9:00 AM
+local jobEnd = 17 * 60     -- 5:00 PM
 
-local npcPoints = npcPointsFolder:GetChildren()
-table.sort(npcPoints, function(a, b) return a.Position.X < b.Position.X end)
+local currentTarget = nil
+local moving = false
+local REACH_THRESHOLD = 4 -- studs to consider “arrived”
+local STUCK_CHECK_INTERVAL = 3 -- seconds
+local STUCK_DISTANCE_THRESHOLD = 2 -- how much he needs to move to NOT be stuck
 
-local function moveToPosition(position)
-	local path = PathfindingService:CreatePath()
-	path:ComputeAsync(hrp.Position, position)
+local lastPosition = hrp.Position
+local lastCheckTime = tick()
 
-	if path.Status == Enum.PathStatus.Success then
-		for _, waypoint in ipairs(path:GetWaypoints()) do
-			if waypoint.Action == Enum.PathWaypointAction.Jump then
-				humanoid.Jump = true
+local function createPath(startPos, endPos)
+	local path = PathfindingService:CreatePath({
+		AgentRadius = 2,
+		AgentHeight = 5,
+		AgentCanJump = true,
+		AgentJumpHeight = 10,
+		AgentCanClimb = true,
+	})
+	path:ComputeAsync(startPos, endPos)
+	return path
+end
+
+local function followPath(target)
+	moving = true
+	while currentTarget == target do
+		local distToTarget = (hrp.Position - target.Position).Magnitude
+		if distToTarget <= REACH_THRESHOLD then
+			-- Arrived!
+			humanoid:MoveTo(hrp.Position)
+			task.wait(1)
+			-- Continue checking if moved away
+		else
+			local path = createPath(hrp.Position, target.Position)
+
+			if path.Status == Enum.PathStatus.Success then
+				for _, waypoint in ipairs(path:GetWaypoints()) do
+					if currentTarget ~= target then break end
+
+					if waypoint.Action == Enum.PathWaypointAction.Jump then
+						humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+					end
+
+					humanoid:MoveTo(waypoint.Position)
+
+					local reached = humanoid.MoveToFinished:Wait()
+					if not reached then
+						warn("Stuck or interrupted — recalculating path...")
+						break
+					end
+				end
+			else
+				warn("No path found — retrying...")
 			end
-			humanoid:MoveTo(waypoint.Position)
-			local reached = humanoid.MoveToFinished:Wait()
-			if not reached then return false end
 		end
-		return true
-	else
-		warn("Path failed for NPC:", npc.Name)
-		return false
-	end
-end
 
-local function walkPathOut()
-	for _, point in ipairs(npcPoints) do
-		if not moveToPosition(point.Position) then break end
-	end
-end
+		-- Check if stuck (haven't moved much)
+		if tick() - lastCheckTime > STUCK_CHECK_INTERVAL then
+			local movedDist = (hrp.Position - lastPosition).Magnitude
+			if movedDist < STUCK_DISTANCE_THRESHOLD then
+				warn("NPC might be stuck, retrying path...")
+			end
+			lastPosition = hrp.Position
+			lastCheckTime = tick()
+		end
 
-local function walkPathBack()
-	for i = #npcPoints, 1, -1 do
-		if not moveToPosition(npcPoints[i].Position) then break end
+		task.wait(1)
 	end
+	moving = false
 end
-
-local function goToJob()
-	local jobPart = jobSitesFolder:FindFirstChild(assignedJob.Value)
-	if jobPart then
-		moveToPosition(jobPart.Position)
-	else
-		warn("Job site not found for:", assignedJob.Value)
-	end
-end
-
-local isOutside = false
 
 while true do
-	wait(1)
-	local hour = math.floor((Lighting.ClockTime + 0.01) % 24)
+	local currentTime = Lighting:GetMinutesAfterMidnight()
+	local target
 
-	if hour >= 9 and hour < 21 then
-		if isOutside then
-			walkPathBack()
-			isOutside = false
-		end
-		goToJob()
+	if currentTime >= jobStart and currentTime < jobEnd then
+		target = jobPart
 	else
-		if not isOutside then
-			walkPathOut()
-			isOutside = true
+		target = homePart
+	end
+
+	if target ~= currentTarget then
+		currentTarget = target
+		if not moving then
+			task.spawn(function()
+				followPath(target)
+			end)
 		end
 	end
+
+	task.wait(1)
 end
