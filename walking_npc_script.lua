@@ -6,233 +6,172 @@ local hrp = npc:WaitForChild("HumanoidRootPart")
 local jobPart = workspace:WaitForChild("JobPart")
 local homePart = workspace:WaitForChild("HomePart")
 
--- Waypoint folders (optional - will use direct pathfinding if not found)
+-- Waypoint folders
 local toJobWaypoints = workspace:FindFirstChild("ToJobWaypoints")
 local toHomeWaypoints = workspace:FindFirstChild("ToHomeWaypoints")
 
+-- Services
 local Lighting = game:GetService("Lighting")
 local PathfindingService = game:GetService("PathfindingService")
 
--- Time constants (matching your time system)
-local jobStart = 9 * 60    -- 9:00 AM (540 minutes)
-local jobEnd = 17 * 60     -- 5:00 PM (1020 minutes)
+-- Constants
+local jobStart = 9 * 60
+local jobEnd = 17 * 60
+local ARRIVAL_DISTANCE = 8
 
--- Movement variables
-local currentTarget = nil
+-- Movement state
 local isMoving = false
-local ARRIVAL_DISTANCE = 8 -- How close to get to waypoints/target (increased)
-local hasInitialized = false -- Track if we've set initial position
+local currentTarget = nil
+local hasInitialized = false
 
--- Function to get waypoints in order
-local function getOrderedWaypoints(waypointFolder)
-	if not waypointFolder then return {} end
-
+-- Get ordered waypoints
+local function getOrderedWaypoints(folder)
+	if not folder then return {} end
 	local waypoints = {}
-	for _, child in pairs(waypointFolder:GetChildren()) do
+	for _, child in pairs(folder:GetChildren()) do
 		if child:IsA("BasePart") then
-			-- Extract number from name (e.g., "Waypoint1", "Point2", "WP3")
-			local number = tonumber(string.match(child.Name, "%d+"))
-			if number then
-				waypoints[number] = child
+			local index = tonumber(string.match(child.Name, "%d+"))
+			if index then
+				waypoints[index] = child
 			end
 		end
 	end
 
-	-- Convert to ordered array
-	local orderedWaypoints = {}
+	local ordered = {}
 	for i = 1, #waypoints do
 		if waypoints[i] then
-			table.insert(orderedWaypoints, waypoints[i])
+			table.insert(ordered, waypoints[i])
 		end
 	end
-
-	return orderedWaypoints
+	return ordered
 end
 
--- Function to walk through waypoints
-local function walkThroughWaypoints(waypoints, finalTarget)
-	for i, waypoint in ipairs(waypoints) do
-		if currentTarget ~= finalTarget then
-			print("Target changed, stopping waypoint following")
-			break -- Target changed, stop following this path
+-- Walk through waypoints
+local function walkThroughWaypoints(waypoints, targetPart)
+	for i, wp in ipairs(waypoints) do
+		if currentTarget ~= targetPart then
+			print("Target changed. Stop walking.")
+			break
 		end
 
-		print("Walking to waypoint " .. i .. ": " .. waypoint.Name)
+		print("Going to waypoint", wp.Name)
+		humanoid:MoveTo(wp.Position)
 
-		-- Walk to this waypoint
-		humanoid:MoveTo(waypoint.Position)
-
-		-- Wait for arrival with timeout
 		local arrived = false
 		local startTime = tick()
-		local timeout = 20 -- increased timeout
-
-		while tick() - startTime < timeout do
-			local distance = (hrp.Position - waypoint.Position).Magnitude
-			if distance <= ARRIVAL_DISTANCE then
+		while tick() - startTime < 20 do
+			if (hrp.Position - wp.Position).Magnitude <= ARRIVAL_DISTANCE then
 				arrived = true
-				print("Reached waypoint " .. i .. " (distance: " .. math.floor(distance) .. ")")
 				break
 			end
-
-			-- Check if humanoid stopped moving (might be stuck)
-			if humanoid.MoveToFinished.Event:Wait(0.1) then
-				local finalDistance = (hrp.Position - waypoint.Position).Magnitude
-				if finalDistance <= ARRIVAL_DISTANCE then
+			if humanoid.MoveToFinished:Wait(0.1) then
+				if (hrp.Position - wp.Position).Magnitude <= ARRIVAL_DISTANCE then
 					arrived = true
-					print("Reached waypoint " .. i .. " via MoveToFinished")
 					break
-				else
-					print("MoveToFinished but still far from waypoint " .. i .. " (distance: " .. math.floor(finalDistance) .. "), retrying...")
-					humanoid:MoveTo(waypoint.Position) -- Try again
 				end
+				humanoid:MoveTo(wp.Position) -- retry
 			end
 		end
 
-		if arrived then
-			task.wait(1) -- Brief pause at waypoint
-		else
-			local currentDistance = (hrp.Position - waypoint.Position).Magnitude
-			print("Timeout at waypoint " .. i .. " (distance: " .. math.floor(currentDistance) .. "), continuing anyway...")
+		if not arrived then
+			print("Timeout at waypoint", wp.Name)
 		end
+
+		task.wait(0.5)
 	end
 end
 
--- Enhanced pathfinding function with waypoints
+-- Walk to final destination
 local function walkToTarget(targetPart)
 	if isMoving then return end
 	isMoving = true
+	print("Walking to", targetPart.Name)
 
-	print("NPC walking to: " .. targetPart.Name)
-
-	-- Determine which waypoints to use
 	local waypoints = {}
 	if targetPart == jobPart then
 		waypoints = getOrderedWaypoints(toJobWaypoints)
-		if #waypoints > 0 then
-			print("Using " .. #waypoints .. " waypoints to reach job")
-		end
 	elseif targetPart == homePart then
 		waypoints = getOrderedWaypoints(toHomeWaypoints)
-		if #waypoints > 0 then
-			print("Using " .. #waypoints .. " waypoints to reach home")
-		end
 	end
 
-	-- Follow waypoints if they exist
+	-- Set currentTarget here
+	currentTarget = targetPart
+
+	-- Waypoint path
 	if #waypoints > 0 then
+		print("Using", #waypoints, "waypoints")
 		walkThroughWaypoints(waypoints, targetPart)
-
-		-- After waypoints, go to final target
-		if currentTarget == targetPart then
-			print("Following waypoints complete, going to final target...")
-		end
 	end
 
-	-- Final movement to target (either after waypoints or direct if no waypoints)
-	if currentTarget == targetPart then
-		-- Create path to final target
-		local path = PathfindingService:CreatePath({
-			AgentRadius = 2,
-			AgentHeight = 5,
-			AgentCanJump = true,
-			AgentJumpHeight = 10,
-		})
+	-- Pathfinding to final destination
+	local path = PathfindingService:CreatePath({
+		AgentRadius = 2,
+		AgentHeight = 5,
+		AgentCanJump = true,
+		AgentJumpHeight = 10,
+	})
 
-		-- Compute path
-		local success, errorMessage = pcall(function()
-			path:ComputeAsync(hrp.Position, targetPart.Position)
-		end)
+	local success = pcall(function()
+		path:ComputeAsync(hrp.Position, targetPart.Position)
+	end)
 
-		if success and path.Status == Enum.PathStatus.Success then
-			local pathWaypoints = path:GetWaypoints()
-
-			-- Follow each pathfinding waypoint
-			for i, waypoint in ipairs(pathWaypoints) do
-				-- Stop if target changed
-				if currentTarget ~= targetPart then
-					break
-				end
-
-				-- Handle jumping
-				if waypoint.Action == Enum.PathWaypointAction.Jump then
-					humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
-				end
-
-				-- Move to waypoint
-				humanoid:MoveTo(waypoint.Position)
-
-				-- Wait for arrival or timeout
-				local reached = humanoid.MoveToFinished:Wait(5)
-				if not reached then
-					print("Timeout at pathfinding waypoint " .. i .. ", continuing...")
-				end
+	if success and path.Status == Enum.PathStatus.Success then
+		for i, wp in ipairs(path:GetWaypoints()) do
+			if currentTarget ~= targetPart then break end
+			if wp.Action == Enum.PathWaypointAction.Jump then
+				humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
 			end
-		else
-			-- Pathfinding failed, try direct movement
-			print("Pathfinding failed, trying direct movement to " .. targetPart.Name)
-			humanoid:MoveTo(targetPart.Position)
-			humanoid.MoveToFinished:Wait(10)
+			humanoid:MoveTo(wp.Position)
+			humanoid.MoveToFinished:Wait(5)
 		end
+	else
+		print("Pathfinding failed. Moving directly.")
+		humanoid:MoveTo(targetPart.Position)
+		humanoid.MoveToFinished:Wait(10)
+	end
 
-		-- Final check and orientation
-		local finalDistance = (hrp.Position - targetPart.Position).Magnitude
-		if finalDistance <= ARRIVAL_DISTANCE then
-			print("NPC arrived at " .. targetPart.Name)
-
-			-- Face the same direction as the target part
-			if targetPart.CFrame then
-				local targetDirection = targetPart.CFrame.LookVector
-				local horizontalDirection = Vector3.new(targetDirection.X, 0, targetDirection.Z)
-				if horizontalDirection.Magnitude > 0.1 then
-					local newCFrame = CFrame.lookAt(hrp.Position, hrp.Position + horizontalDirection)
-					hrp.CFrame = newCFrame
-				end
-			end
-		else
-			print("NPC didn't quite reach " .. targetPart.Name .. " (distance: " .. math.floor(finalDistance) .. ")")
+	-- Final orientation
+	if (hrp.Position - targetPart.Position).Magnitude <= ARRIVAL_DISTANCE then
+		print("Arrived at", targetPart.Name)
+		local lookDir = targetPart.CFrame.LookVector
+		local dir = Vector3.new(lookDir.X, 0, lookDir.Z)
+		if dir.Magnitude > 0.1 then
+			hrp.CFrame = CFrame.lookAt(hrp.Position, hrp.Position + dir)
 		end
+	else
+		print("Didn't quite arrive. Distance:", math.floor((hrp.Position - targetPart.Position).Magnitude))
 	end
 
 	isMoving = false
 end
 
--- Main loop
+-- MAIN LOOP
 while true do
-	local currentTime = Lighting:GetMinutesAfterMidnight()
-	local targetPart
+	local minutes = Lighting:GetMinutesAfterMidnight()
+	local newTarget
 
-	-- Determine where NPC should be based on time
-	if currentTime >= jobStart and currentTime < jobEnd then
-		targetPart = jobPart
+	if minutes >= jobStart and minutes < jobEnd then
+		newTarget = jobPart
 	else
-		targetPart = homePart
+		newTarget = homePart
 	end
 
-	-- Initialize position on first run (make sure NPC starts at home)
 	if not hasInitialized then
 		hasInitialized = true
-		currentTarget = homePart -- Start at home
-		print("NPC initialized at home")
+		currentTarget = newTarget
+		print("Initialized NPC at:", newTarget.Name)
 	end
 
-	-- If target changed, start moving
-	if targetPart ~= currentTarget then
-		currentTarget = targetPart
+	if newTarget ~= currentTarget and not isMoving then
 
-		local timeString
-		local hours = math.floor(currentTime / 60)
-		local minutes = currentTime % 60
-		timeString = string.format("%02d:%02d", hours, minutes)
+		local h = math.floor(minutes / 60)
+		local m = minutes % 60
+		print(string.format("Time: %02d:%02d - Heading to %s", h, m, newTarget.Name))
 
-		print("Time: " .. timeString .. " - NPC needs to go to " .. targetPart.Name)
-
-		-- Start walking in a new thread
 		task.spawn(function()
-			walkToTarget(targetPart)
+			walkToTarget(newTarget)
 		end)
 	end
 
-	-- Check every 5 seconds (more frequent checking)
 	task.wait(5)
 end
