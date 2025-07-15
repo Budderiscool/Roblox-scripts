@@ -1,0 +1,273 @@
+-- CLIENT SCRIPT (Place in StarterPlayerScripts)
+local UserInputService = game:GetService("UserInputService")
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
+local StarterGui = game:GetService("StarterGui")
+
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+
+-- Hide default Roblox UI
+StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Backpack, false)
+StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.PlayerList, false)
+StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Health, false)
+StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Chat, true)
+-- Optional: Hide more UI elements
+-- StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.All, false)
+
+-- Wait for RemoteEvents
+local remoteEventsFolder = ReplicatedStorage:WaitForChild("RemoteEvents")
+local equipToolRemote = remoteEventsFolder:WaitForChild("EquipTool")
+local getToolsRemote = remoteEventsFolder:WaitForChild("GetTools")
+
+-- Variables
+local availableTools = {}
+local currentItemIndex = 1
+local isEquipping = false
+local lastSwapTime = 0
+local SWAP_COOLDOWN = 0.5 -- Cooldown in seconds (adjust as needed)
+
+-- Function to load available tools from server
+local function loadAvailableTools()
+	local success, tools = pcall(function()
+		return getToolsRemote:InvokeServer()
+	end)
+
+	if success and tools then
+		availableTools = tools
+		if #availableTools > 0 then
+			currentItemIndex = 1
+		end
+	else
+		warn("Failed to load tools from server")
+	end
+end
+
+-- Function to check if cooldown is active
+local function isCooldownActive()
+	local currentTime = tick()
+	return (currentTime - lastSwapTime) < SWAP_COOLDOWN
+end
+
+-- Function to update cooldown display
+local function updateCooldownDisplay()
+	if not isCooldownActive() then return end
+
+	local remainingTime = SWAP_COOLDOWN - (tick() - lastSwapTime)
+
+	if playerGui:FindFirstChild("Hotbar") then
+		local hotbar = playerGui.Hotbar
+		if hotbar:FindFirstChild("Item") then
+			local itemFrame = hotbar.Item
+
+			-- Update cooldown indicator
+			if itemFrame:FindFirstChild("TextButton") then
+				local textButton = itemFrame.TextButton
+				textButton.BackgroundColor3 = Color3.fromRGB(255, 100, 100) -- Red during cooldown
+				textButton.Text = "Cooldown: " .. string.format("%.1f", remainingTime)
+			end
+		end
+	end
+end
+local function updateUI()
+	if #availableTools == 0 then return end
+
+	local currentItem = availableTools[currentItemIndex]
+
+	-- Update your custom hotbar GUI
+	if playerGui:FindFirstChild("Hotbar") then
+		local hotbar = playerGui.Hotbar
+
+		-- Update the Item frame
+		if hotbar:FindFirstChild("Item") then
+			local itemFrame = hotbar.Item
+
+			-- Update TextButton (main item display)
+			if itemFrame:FindFirstChild("TextButton") then
+				local textButton = itemFrame.TextButton
+				textButton.Text = currentItem.name
+
+				-- Add selection highlight
+				textButton.BackgroundColor3 = Color3.fromRGB(85, 170, 255) -- Blue highlight
+				textButton.BorderSizePixel = 2
+				textButton.BorderColor3 = Color3.fromRGB(255, 255, 255)
+
+				-- Smooth fade effect
+				local fadeInfo = TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+				local originalColor = textButton.BackgroundColor3
+				textButton.BackgroundColor3 = Color3.fromRGB(100, 200, 100) -- Flash green
+
+				local flashTween = TweenService:Create(textButton, fadeInfo, {BackgroundColor3 = originalColor})
+				flashTween:Play()
+			end
+
+			-- Update first TextLabel (item name/description)
+			local textLabels = {}
+			for _, child in pairs(itemFrame:GetChildren()) do
+				if child:IsA("TextLabel") then
+					table.insert(textLabels, child)
+				end
+			end
+
+			if #textLabels >= 1 then
+				textLabels[1].Text = currentItem.name
+			end
+
+			-- Update second TextLabel (controls or info)
+			if #textLabels >= 2 then
+				textLabels[2].Text = "Q/E to switch | R to unequip | " .. currentItemIndex .. "/" .. #availableTools
+			end
+		end
+	end
+
+	print("Current item: " .. currentItem.name .. " (Index: " .. currentItemIndex .. "/" .. #availableTools .. ")")
+end
+
+-- Function to equip the current item
+local function equipCurrentItem()
+	if isEquipping or #availableTools == 0 or isCooldownActive() then 
+		if isCooldownActive() then
+			print("Weapon swap on cooldown!")
+		end
+		return 
+	end
+
+	isEquipping = true
+	lastSwapTime = tick() -- Record the time of swap
+
+	local currentItem = availableTools[currentItemIndex]
+
+	-- Request server to equip the tool
+	equipToolRemote:FireServer(currentItem.toolName)
+
+	-- Update UI
+	updateUI()
+
+	-- Small delay to prevent spam
+	wait(0.1)
+	isEquipping = false
+end
+
+-- Function to unequip current tool
+local function unequipCurrentTool()
+	if isEquipping or isCooldownActive() then 
+		if isCooldownActive() then
+			print("Weapon swap on cooldown!")
+		end
+		return 
+	end
+
+	isEquipping = true
+	lastSwapTime = tick() -- Record the time of action
+
+	-- Request server to unequip (pass empty string or nil)
+	equipToolRemote:FireServer("")
+
+	-- Update UI to show no item equipped
+	if playerGui:FindFirstChild("Hotbar") then
+		local hotbar = playerGui.Hotbar
+		if hotbar:FindFirstChild("Item") then
+			local itemFrame = hotbar.Item
+
+			-- Update TextButton
+			if itemFrame:FindFirstChild("TextButton") then
+				local textButton = itemFrame.TextButton
+				textButton.Text = "No Item"
+				textButton.BackgroundColor3 = Color3.fromRGB(60, 60, 60) -- Gray for no item
+				textButton.BorderSizePixel = 0
+
+				-- Flash effect
+				local fadeInfo = TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+				textButton.BackgroundColor3 = Color3.fromRGB(200, 100, 100) -- Flash red
+
+				local flashTween = TweenService:Create(textButton, fadeInfo, {BackgroundColor3 = Color3.fromRGB(60, 60, 60)})
+				flashTween:Play()
+			end
+
+			-- Update TextLabels
+			local textLabels = {}
+			for _, child in pairs(itemFrame:GetChildren()) do
+				if child:IsA("TextLabel") then
+					table.insert(textLabels, child)
+				end
+			end
+
+			if #textLabels >= 1 then
+				textLabels[1].Text = "Unequipped"
+			end
+
+			if #textLabels >= 2 then
+				textLabels[2].Text = "Q/E to equip | R to unequip"
+			end
+		end
+	end
+
+	print("Unequipped current tool")
+
+	-- Small delay to prevent spam
+	wait(0.1)
+	isEquipping = false
+end
+local function nextItem()
+	if #availableTools == 0 or isCooldownActive() then 
+		if isCooldownActive() then
+			print("Weapon swap on cooldown!")
+		end
+		return 
+	end
+
+	currentItemIndex = currentItemIndex + 1
+	if currentItemIndex > #availableTools then
+		currentItemIndex = 1
+	end
+	equipCurrentItem()
+end
+
+-- Function to go to previous item (Q key)
+local function previousItem()
+	if #availableTools == 0 or isCooldownActive() then 
+		if isCooldownActive() then
+			print("Weapon swap on cooldown!")
+		end
+		return 
+	end
+
+	currentItemIndex = currentItemIndex - 1
+	if currentItemIndex < 1 then
+		currentItemIndex = #availableTools
+	end
+	equipCurrentItem()
+end
+
+-- Handle input
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+	if gameProcessed then return end
+
+	if input.KeyCode == Enum.KeyCode.E then
+		nextItem()
+	elseif input.KeyCode == Enum.KeyCode.Q then
+		previousItem()
+	elseif input.KeyCode == Enum.KeyCode.R then
+		unequipCurrentTool()
+	end
+end)
+
+-- Initialize when player spawns
+player.CharacterAdded:Connect(function(character)
+	character:WaitForChild("Humanoid")
+	wait(1) -- Wait for character to fully load
+	loadAvailableTools()
+	if #availableTools > 0 then
+		equipCurrentItem()
+	end
+end)
+
+-- If character already exists
+if player.Character then
+	loadAvailableTools()
+	if #availableTools > 0 then
+		wait(1)
+		equipCurrentItem()
+	end
+end
