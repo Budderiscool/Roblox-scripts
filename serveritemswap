@@ -1,0 +1,76 @@
+-- SERVER SCRIPT (Place in ServerScriptService)
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ServerStorage = game:GetService("ServerStorage")
+local Players = game:GetService("Players")
+
+-- Create RemoteEvents
+local remoteEventsFolder = ReplicatedStorage:FindFirstChild("RemoteEvents")
+if not remoteEventsFolder then
+	remoteEventsFolder = Instance.new("Folder")
+	remoteEventsFolder.Name = "RemoteEvents"
+	remoteEventsFolder.Parent = ReplicatedStorage
+end
+
+local equipToolRemote = Instance.new("RemoteEvent")
+equipToolRemote.Name = "EquipTool"
+equipToolRemote.Parent = remoteEventsFolder
+
+local getToolsRemote = Instance.new("RemoteFunction")
+getToolsRemote.Name = "GetTools"
+getToolsRemote.Parent = remoteEventsFolder
+
+-- Get tools from ServerStorage
+local toolsFolder = ServerStorage:FindFirstChild("Tools")
+if not toolsFolder then
+	warn("Tools folder not found in ServerStorage!")
+	return
+end
+
+-- Function to get all available tools
+local function getAvailableTools()
+	local tools = {}
+	for _, tool in pairs(toolsFolder:GetChildren()) do
+		if tool:IsA("Tool") then
+			table.insert(tools, {
+				name = tool.Name,
+				toolName = tool.Name
+			})
+		end
+	end
+	return tools
+end
+
+-- Handle tool requests from client
+getToolsRemote.OnServerInvoke = function(player)
+	return getAvailableTools()
+end
+
+-- Handle equip tool requests
+equipToolRemote.OnServerEvent:Connect(function(player, toolName)
+	local character = player.Character
+	if not character then return end
+
+	-- Remove current tool
+	local currentTool = character:FindFirstChildOfClass("Tool")
+	if currentTool then
+		currentTool:Destroy()
+	end
+
+	-- If toolName is empty or nil, just unequip (don't equip anything)
+	if not toolName or toolName == "" then
+		return
+	end
+
+	-- Find the tool in ServerStorage
+	local toolToClone = toolsFolder:FindFirstChild(toolName)
+	if toolToClone and toolToClone:IsA("Tool") then
+		-- Clone the tool and give it to the player
+		local newTool = toolToClone:Clone()
+		newTool.Parent = character
+
+		-- Equip the tool
+		if character:FindFirstChild("Humanoid") then
+			character.Humanoid:EquipTool(newTool)
+		end
+	end
+end)
