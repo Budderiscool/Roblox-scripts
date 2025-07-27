@@ -1,0 +1,433 @@
+-- Place this script in StarterPlayer > StarterPlayerScripts
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+
+-- Item rarities and their colors
+local RARITIES = {
+    Common = Color3.fromRGB(169, 169, 169), -- Gray
+    Rare = Color3.fromRGB(0, 112, 221), -- Blue
+    Epic = Color3.fromRGB(163, 53, 233), -- Purple
+    Legendary = Color3.fromRGB(255, 215, 0) -- Gold
+}
+
+-- Items that don't stack (add item names here)
+local NON_STACKABLE_ITEMS = {
+    "Legendary Sword",
+    "Epic Bow",
+    "Rare Staff"
+    -- Add more weapon names that shouldn't stack
+}
+
+-- Inventory data
+local inventory = {}
+local hotbar = {}
+local equipment = {
+    Helmet = nil,
+    Chestplate = nil,
+    Legs = nil,
+    Boots = nil,
+    Weapon = nil
+}
+
+local currentHotbarSlot = 1
+local inventoryOpen = false
+
+-- Create main GUI
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "InventorySystem"
+screenGui.ResetOnSpawn = false
+screenGui.Parent = playerGui
+
+-- Create hotbar
+local hotbarFrame = Instance.new("Frame")
+hotbarFrame.Name = "Hotbar"
+hotbarFrame.Size = UDim2.new(0, 250, 0, 50)
+hotbarFrame.Position = UDim2.new(0.5, -125, 1, -70)
+hotbarFrame.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+hotbarFrame.BorderSizePixel = 0
+hotbarFrame.Parent = screenGui
+
+local hotbarCorner = Instance.new("UICorner")
+hotbarCorner.CornerRadius = UDim.new(0, 8)
+hotbarCorner.Parent = hotbarFrame
+
+-- Create hotbar slots
+local hotbarSlots = {}
+for i = 1, 5 do
+    local slot = Instance.new("Frame")
+    slot.Name = "Slot" .. i
+    slot.Size = UDim2.new(0, 40, 0, 40)
+    slot.Position = UDim2.new(0, 5 + (i-1) * 48, 0, 5)
+    slot.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+    slot.BorderSizePixel = 2
+    slot.BorderColor3 = Color3.fromRGB(100, 100, 100)
+    slot.Parent = hotbarFrame
+    
+    local slotCorner = Instance.new("UICorner")
+    slotCorner.CornerRadius = UDim.new(0, 4)
+    slotCorner.Parent = slot
+    
+    local itemImage = Instance.new("ImageLabel")
+    itemImage.Name = "ItemImage"
+    itemImage.Size = UDim2.new(1, -4, 1, -4)
+    itemImage.Position = UDim2.new(0, 2, 0, 2)
+    itemImage.BackgroundTransparency = 1
+    itemImage.Image = ""
+    itemImage.Parent = slot
+    
+    local itemCount = Instance.new("TextLabel")
+    itemCount.Name = "ItemCount"
+    itemCount.Size = UDim2.new(0, 20, 0, 15)
+    itemCount.Position = UDim2.new(1, -22, 1, -17)
+    itemCount.BackgroundTransparency = 1
+    itemCount.Text = ""
+    itemCount.TextColor3 = Color3.new(1, 1, 1)
+    itemCount.TextScaled = true
+    itemCount.Font = Enum.Font.SourceSansBold
+    itemCount.Parent = slot
+    
+    hotbarSlots[i] = slot
+end
+
+-- Highlight current hotbar slot
+local function updateHotbarSelection()
+    for i, slot in pairs(hotbarSlots) do
+        if i == currentHotbarSlot then
+            slot.BorderColor3 = Color3.fromRGB(255, 255, 255)
+            slot.BorderSizePixel = 3
+        else
+            slot.BorderColor3 = Color3.fromRGB(100, 100, 100)
+            slot.BorderSizePixel = 2
+        end
+    end
+end
+
+-- Create inventory GUI
+local inventoryFrame = Instance.new("Frame")
+inventoryFrame.Name = "Inventory"
+inventoryFrame.Size = UDim2.new(0, 600, 0, 400)
+inventoryFrame.Position = UDim2.new(0.5, -300, 0.5, -200)
+inventoryFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+inventoryFrame.BorderSizePixel = 0
+inventoryFrame.Visible = false
+inventoryFrame.Parent = screenGui
+
+local inventoryCorner = Instance.new("UICorner")
+inventoryCorner.CornerRadius = UDim.new(0, 10)
+inventoryCorner.Parent = inventoryFrame
+
+-- Inventory title
+local inventoryTitle = Instance.new("TextLabel")
+inventoryTitle.Name = "Title"
+inventoryTitle.Size = UDim2.new(1, 0, 0, 30)
+inventoryTitle.Position = UDim2.new(0, 0, 0, 0)
+inventoryTitle.BackgroundTransparency = 1
+inventoryTitle.Text = "Inventory"
+inventoryTitle.TextColor3 = Color3.new(1, 1, 1)
+inventoryTitle.TextScaled = true
+inventoryTitle.Font = Enum.Font.SourceSansBold
+inventoryTitle.Parent = inventoryFrame
+
+-- Main content frame
+local contentFrame = Instance.new("Frame")
+contentFrame.Name = "Content"
+contentFrame.Size = UDim2.new(1, -20, 1, -40)
+contentFrame.Position = UDim2.new(0, 10, 0, 35)
+contentFrame.BackgroundTransparency = 1
+contentFrame.Parent = inventoryFrame
+
+-- Equipment frame
+local equipmentFrame = Instance.new("Frame")
+equipmentFrame.Name = "Equipment"
+equipmentFrame.Size = UDim2.new(0, 120, 1, 0)
+equipmentFrame.Position = UDim2.new(0, 0, 0, 0)
+equipmentFrame.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+equipmentFrame.BorderSizePixel = 0
+equipmentFrame.Parent = contentFrame
+
+local equipmentCorner = Instance.new("UICorner")
+equipmentCorner.CornerRadius = UDim.new(0, 8)
+equipmentCorner.Parent = equipmentFrame
+
+-- Equipment slots
+local equipmentSlots = {}
+local equipmentPositions = {
+    Helmet = {x = 60, y = 10},
+    Chestplate = {x = 60, y = 70},
+    Legs = {x = 60, y = 130},
+    Boots = {x = 60, y = 190},
+    Weapon = {x = 10, y = 70}
+}
+
+for slotType, pos in pairs(equipmentPositions) do
+    local slot = Instance.new("Frame")
+    slot.Name = slotType
+    slot.Size = UDim2.new(0, 40, 0, 40)
+    slot.Position = UDim2.new(0, pos.x - 20, 0, pos.y)
+    slot.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+    slot.BorderSizePixel = 2
+    slot.BorderColor3 = Color3.fromRGB(100, 100, 100)
+    slot.Parent = equipmentFrame
+    
+    local slotCorner = Instance.new("UICorner")
+    slotCorner.CornerRadius = UDim.new(0, 4)
+    slotCorner.Parent = slot
+    
+    local itemImage = Instance.new("ImageLabel")
+    itemImage.Name = "ItemImage"
+    itemImage.Size = UDim2.new(1, -4, 1, -4)
+    itemImage.Position = UDim2.new(0, 2, 0, 2)
+    itemImage.BackgroundTransparency = 1
+    itemImage.Image = ""
+    itemImage.Parent = slot
+    
+    local slotLabel = Instance.new("TextLabel")
+    slotLabel.Name = "Label"
+    slotLabel.Size = UDim2.new(0, 50, 0, 15)
+    slotLabel.Position = UDim2.new(0.5, -25, 1, 5)
+    slotLabel.BackgroundTransparency = 1
+    slotLabel.Text = slotType
+    slotLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+    slotLabel.TextScaled = true
+    slotLabel.Font = Enum.Font.SourceSans
+    slotLabel.Parent = slot
+    
+    equipmentSlots[slotType] = slot
+end
+
+-- Inventory grid
+local inventoryGrid = Instance.new("ScrollingFrame")
+inventoryGrid.Name = "InventoryGrid"
+inventoryGrid.Size = UDim2.new(1, -140, 1, 0)
+inventoryGrid.Position = UDim2.new(0, 130, 0, 0)
+inventoryGrid.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+inventoryGrid.BorderSizePixel = 0
+inventoryGrid.ScrollBarThickness = 8
+inventoryGrid.ScrollBarImageColor3 = Color3.fromRGB(100, 100, 100)
+inventoryGrid.Parent = contentFrame
+
+local inventoryGridCorner = Instance.new("UICorner")
+inventoryGridCorner.CornerRadius = UDim.new(0, 8)
+inventoryGridCorner.Parent = inventoryGrid
+
+-- Create inventory slots
+local inventorySlots = {}
+local slotsPerRow = 7
+local slotSize = 50
+local slotPadding = 5
+
+for i = 1, 35 do
+    local row = math.floor((i - 1) / slotsPerRow)
+    local col = (i - 1) % slotsPerRow
+    
+    local slot = Instance.new("Frame")
+    slot.Name = "Slot" .. i
+    slot.Size = UDim2.new(0, slotSize, 0, slotSize)
+    slot.Position = UDim2.new(0, col * (slotSize + slotPadding) + slotPadding, 0, row * (slotSize + slotPadding) + slotPadding)
+    slot.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+    slot.BorderSizePixel = 1
+    slot.BorderColor3 = Color3.fromRGB(100, 100, 100)
+    slot.Parent = inventoryGrid
+    
+    local slotCorner = Instance.new("UICorner")
+    slotCorner.CornerRadius = UDim.new(0, 4)
+    slotCorner.Parent = slot
+    
+    local itemImage = Instance.new("ImageLabel")
+    itemImage.Name = "ItemImage"
+    itemImage.Size = UDim2.new(1, -4, 1, -4)
+    itemImage.Position = UDim2.new(0, 2, 0, 2)
+    itemImage.BackgroundTransparency = 1
+    itemImage.Image = ""
+    itemImage.Parent = slot
+    
+    local itemCount = Instance.new("TextLabel")
+    itemCount.Name = "ItemCount"
+    itemCount.Size = UDim2.new(0, 20, 0, 15)
+    itemCount.Position = UDim2.new(1, -22, 1, -17)
+    itemCount.BackgroundTransparency = 1
+    itemCount.Text = ""
+    itemCount.TextColor3 = Color3.new(1, 1, 1)
+    itemCount.TextScaled = true
+    itemCount.Font = Enum.Font.SourceSansBold
+    itemCount.Parent = slot
+    
+    inventorySlots[i] = slot
+end
+
+-- Update canvas size for scrolling
+local totalRows = math.ceil(35 / slotsPerRow)
+inventoryGrid.CanvasSize = UDim2.new(0, 0, 0, totalRows * (slotSize + slotPadding) + slotPadding)
+
+-- Initialize inventory and hotbar with empty slots
+for i = 1, 35 do
+    inventory[i] = nil
+end
+
+for i = 1, 5 do
+    hotbar[i] = nil
+end
+
+-- Item utility functions
+local function isNonStackable(itemName)
+    for _, name in pairs(NON_STACKABLE_ITEMS) do
+        if name == itemName then
+            return true
+        end
+    end
+    return false
+end
+
+local function canStackItems(item1, item2)
+    if not item1 or not item2 then return false end
+    if item1.Name ~= item2.Name then return false end
+    if isNonStackable(item1.Name) then return false end
+    return true
+end
+
+-- Update UI functions
+local function updateSlotUI(slot, item)
+    local itemImage = slot:FindFirstChild("ItemImage")
+    local itemCount = slot:FindFirstChild("ItemCount")
+    
+    if item then
+        itemImage.Image = item.Image or ""
+        if item.Count and item.Count > 1 then
+            itemCount.Text = tostring(item.Count)
+        else
+            itemCount.Text = ""
+        end
+        
+        -- Set rarity border color
+        if item.Rarity and RARITIES[item.Rarity] then
+            slot.BorderColor3 = RARITIES[item.Rarity]
+            slot.BorderSizePixel = 2
+        else
+            slot.BorderColor3 = Color3.fromRGB(100, 100, 100)
+            slot.BorderSizePixel = 1
+        end
+    else
+        itemImage.Image = ""
+        itemCount.Text = ""
+        slot.BorderColor3 = Color3.fromRGB(100, 100, 100)
+        slot.BorderSizePixel = 1
+    end
+end
+
+local function updateInventoryUI()
+    for i, slot in pairs(inventorySlots) do
+        updateSlotUI(slot, inventory[i])
+    end
+end
+
+local function updateHotbarUI()
+    for i, slot in pairs(hotbarSlots) do
+        updateSlotUI(slot, hotbar[i])
+    end
+    updateHotbarSelection()
+end
+
+local function updateEquipmentUI()
+    for slotType, slot in pairs(equipmentSlots) do
+        updateSlotUI(slot, equipment[slotType])
+    end
+end
+
+-- Equipment stat system
+local function applyEquipmentStats()
+    local totalHealth = 0
+    local totalDefense = 0
+    local totalSpeed = 0
+    
+    for slotType, item in pairs(equipment) do
+        if item and item.Stats then
+            totalHealth = totalHealth + (item.Stats.Health or 0)
+            totalDefense = totalDefense + (item.Stats.Defense or 0)
+            totalSpeed = totalSpeed + (item.Stats.Speed or 0)
+        end
+    end
+    
+    -- Apply stats to player (you'll need to implement this based on your game)
+    -- This is just a placeholder - customize based on your stat system
+    print("Applied stats - Health: " .. totalHealth .. ", Defense: " .. totalDefense .. ", Speed: " .. totalSpeed)
+end
+
+-- Inventory management functions
+local function addItemToInventory(item)
+    -- Try to stack with existing items first
+    if not isNonStackable(item.Name) then
+        for i = 1, 35 do
+            if inventory[i] and canStackItems(inventory[i], item) then
+                inventory[i].Count = (inventory[i].Count or 1) + (item.Count or 1)
+                updateInventoryUI()
+                return true
+            end
+        end
+    end
+    
+    -- Find empty slot
+    for i = 1, 35 do
+        if not inventory[i] then
+            inventory[i] = item
+            if not item.Count then item.Count = 1 end
+            updateInventoryUI()
+            return true
+        end
+    end
+    
+    return false -- Inventory full
+end
+
+-- Input handling
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+    
+    if input.KeyCode == Enum.KeyCode.Tab then
+        inventoryOpen = not inventoryOpen
+        inventoryFrame.Visible = inventoryOpen
+        
+        if inventoryOpen then
+            updateInventoryUI()
+            updateEquipmentUI()
+        end
+    elseif input.KeyCode == Enum.KeyCode.Q then
+        currentHotbarSlot = currentHotbarSlot - 1
+        if currentHotbarSlot < 1 then currentHotbarSlot = 5 end
+        updateHotbarSelection()
+    elseif input.KeyCode == Enum.KeyCode.E then
+        currentHotbarSlot = currentHotbarSlot + 1
+        if currentHotbarSlot > 5 then currentHotbarSlot = 1 end
+        updateHotbarSelection()
+    end
+end)
+
+-- Initialize UI
+updateHotbarSelection()
+updateInventoryUI()
+updateEquipmentUI()
+
+-- Example: Add some test items (remove this in production)
+wait(1)
+addItemToInventory({
+    Name = "Iron Sword",
+    Image = "rbxassetid://123456789", -- Replace with actual image ID
+    Rarity = "Common",
+    Type = "Weapon",
+    Stats = {Health = 0, Defense = 0, Speed = 0, Damage = 25}
+})
+
+addItemToInventory({
+    Name = "Steel Helmet",
+    Image = "rbxassetid://123456789", -- Replace with actual image ID
+    Rarity = "Rare",
+    Type = "Helmet",
+    Stats = {Health = 20, Defense = 15, Speed = 0}
+})
+
+print("Inventory system loaded! Press Tab to open inventory, E/Q to navigate hotbar.")
